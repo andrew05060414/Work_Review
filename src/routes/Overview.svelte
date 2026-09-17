@@ -1179,12 +1179,12 @@
       if (!refreshed) return;
       cancelDomainSemanticEdit();
       showToast(
-        t('overview.domainSemanticUpdated', {
+        t(updatedCount > 0 ? 'overview.domainSemanticUpdated' : 'overview.domainSemanticSavedWithoutHistory', {
           domain: domainKey,
           category: semanticCategoryStore.getSemanticCategoryDisplayName(nextCategory),
           count: updatedCount,
         }),
-        'success'
+        updatedCount > 0 ? 'success' : 'info'
       );
     } catch (e) {
       if (!isCurrent()) return;

@@ -538,6 +538,21 @@ pub fn infer_browser_page_hint_from_text(text: &str) -> Option<String> {
     extract_url_from_text(text).filter(|url| !is_merged_domain(url))
 }
 
+/// 按采集网址、窗口标题、OCR 文本的优先级解析浏览器页面。
+/// 保留页面路径供展示使用；可疑的合并域名不能阻止标题和 OCR 兜底。
+pub fn resolve_browser_page_hint(
+    browser_url: Option<&str>,
+    window_title: &str,
+    ocr_text: Option<&str>,
+) -> Option<String> {
+    browser_url
+        .map(|url| url.trim().trim_end_matches('/'))
+        .filter(|url| !url.is_empty() && !is_merged_domain(url))
+        .map(str::to_string)
+        .or_else(|| infer_browser_page_hint(window_title))
+        .or_else(|| ocr_text.and_then(infer_browser_page_hint_from_text))
+}
+
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn browser_page_domain_label(page_hint: &str) -> String {
     if let Some(url) = normalize_browser_url_candidate(page_hint) {
@@ -1134,6 +1149,57 @@ mod tests {
         assert!(is_probable_domain("sub.example.com"));
         assert!(!is_probable_domain("1.2.3"));
         assert_eq!(infer_browser_page_hint("https://linux.dolatest"), None);
+    }
+
+    #[test]
+    fn 浏览器页面解析应统一网址标题和ocr的优先级() {
+        let cases = [
+            (
+                Some(" https://example.com/from-url/ "),
+                "https://title.example/page - Chrome",
+                Some("https://ocr.example/page"),
+                Some("https://example.com/from-url"),
+            ),
+            (
+                None,
+                "title.example - Chrome",
+                Some("https://ocr.example/page"),
+                Some("https://title.example"),
+            ),
+            (
+                Some(" \t\n "),
+                "title.example - Chrome",
+                None,
+                Some("https://title.example"),
+            ),
+            (
+                Some(""),
+                "页面加载中",
+                Some("当前页面 https://ocr.example/page"),
+                Some("https://ocr.example/page"),
+            ),
+            (
+                Some("https://linux.dolatest/"),
+                "title.example - Chrome",
+                Some("https://ocr.example/page"),
+                Some("https://title.example"),
+            ),
+            (
+                Some("linux.dolatest"),
+                "页面加载中",
+                Some("当前页面 https://ocr.example/page"),
+                Some("https://ocr.example/page"),
+            ),
+            (None, "页面加载中", None, None),
+        ];
+
+        for (browser_url, title, ocr_text, expected) in cases {
+            assert_eq!(
+                resolve_browser_page_hint(browser_url, title, ocr_text).as_deref(),
+                expected,
+                "网址={browser_url:?}，标题={title}，OCR={ocr_text:?}"
+            );
+        }
     }
 
     #[test]

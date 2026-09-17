@@ -182,7 +182,12 @@ async function collectTestFiles(relativeDirectory: string) {
 async function collectSvelteFiles(relativeDirectory: string) {
   const directory = fileURLToPath(projectFile(relativeDirectory));
   return (await readdir(directory, { recursive: true }))
-    .filter((path) => path.endsWith('.svelte'))
+    .filter((path) => {
+      // 过滤 macOS AppleDouble 元数据（._xxx.svelte）：仓库经同步盘跨平台时
+      // 会混入这类二进制垃圾文件，它们不是第一方组件，不应计入统计。
+      const basename = path.split(/[\\/]/).pop() ?? path;
+      return basename.endsWith('.svelte') && !basename.startsWith('._');
+    })
     .map((path) => join(relativeDirectory, path));
 }
 

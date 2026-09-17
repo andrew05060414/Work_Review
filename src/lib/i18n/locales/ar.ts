@@ -125,6 +125,7 @@ export default {
       saving: 'جاري الحفظ...',
       autoDetected: 'تلقائي',
       domainSemanticUpdated: 'تم تغيير {domain} إلى "{category}" وتمت مزامنة {count} من السجلات التاريخية',
+      domainSemanticSavedWithoutHistory: 'تم حفظ قاعدة التصنيف "{category}" للنطاق {domain}؛ لم يتم العثور على سجلات تاريخية لمزامنتها',
       domainSemanticUpdateFailed: 'فشل تحديث التصنيف الدلالي لـ {domain}: {error}',
       createSemanticCategory: 'تصنيف جديد',
       semanticCategoryNamePlaceholder: 'اسم التصنيف',

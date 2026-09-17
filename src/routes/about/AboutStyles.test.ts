@@ -13,6 +13,21 @@ test('关于页页头应使用操作轴，主体继续使用阅读内容轴', as
   assert.doesNotMatch(source, /about-minimal-shell[^\"]*\bmax-w-4xl\b/);
 });
 
+test('关于页主体应在窗口拉高时自适应垂直居中而非堆积底部空白', async () => {
+  const css = await readFile(cssUrl, 'utf8');
+
+  assert.match(
+    css,
+    /\.about-editorial-shell\s*\{[^}]*min-height:\s*100%;[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/,
+    '关于页外壳应撑满可视高度并纵向布局'
+  );
+  assert.match(
+    css,
+    /\.about-minimal-shell\s*\{[^}]*flex:\s*1 1 auto;[^}]*justify-content:\s*center;/,
+    '主体应占据页头下方剩余空间并垂直居中'
+  );
+});
+
 test('关于页新结构应保持居中、三列更新与留白分组', async () => {
   const css = await readFile(cssUrl, 'utf8');
   const source = await readFile(new URL('./About.svelte', import.meta.url), 'utf8');

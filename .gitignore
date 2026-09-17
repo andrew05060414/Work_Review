@@ -16,6 +16,7 @@ test_uia/*.txt
 
 # OS
 .DS_Store
+._*
 Thumbs.db
 
 # Logs

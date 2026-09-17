@@ -769,11 +769,58 @@ fn last_explicit_user_message(history: &[AssistantChatMessage]) -> Option<&Assis
     None
 }
 
+/// 本机工作数据类词汇（时间线、应用/网站使用、日报等）。
+/// 分类器用它识别"明确的数据查询意图"；GeneralChat 提示注入用它识别
+/// "问题涉及本机数据但当前模式未授权读取"的兜底场景（issue #179）。
+const LOCAL_DATA_TOPIC_SIGNALS: &[&str] = &[
+    "工作记录",
+    "工作記錄",
+    "活动记录",
+    "活動記錄",
+    "屏幕记录",
+    "螢幕記錄",
+    "我的记录",
+    "我的記錄",
+    "应用使用",
+    "應用使用",
+    "时间分布",
+    "時間分布",
+    "时间占比",
+    "時間占比",
+    "前台应用",
+    "前台應用",
+    "工作会话",
+    "工作會話",
+    "工作段",
+    "时间线",
+    "時間線",
+    "日报",
+    "日報",
+    "周报",
+    "週報",
+    "工作总结",
+    "工作總結",
+    "work record",
+    "activity timeline",
+    "app usage",
+    "time breakdown",
+    "daily report",
+    "weekly report",
+];
+
+/// 判断问题是否提及本机工作数据类词汇（大小写不敏感，仅做子串匹配）。
+fn mentions_local_data_topic(question: &str) -> bool {
+    let normalized = question.trim().to_lowercase();
+    contains_any(&normalized, LOCAL_DATA_TOPIC_SIGNALS)
+}
+
 /// 对一条完整用户消息判定能力模式，不读取对话历史。
 ///
 /// 规则遵循“明确工作意图优先、模糊通用词不授权本机数据”的边界：
 /// - 个人/本机工作数据查询、复盘、行动和记忆操作进入工作复盘；
-/// - “日报、记录、时间分布”等词单独出现时仍按普通聊天处理。
+/// - “日报、记录、时间分布”等数据词单独出现（无时间范围或第一人称限定）时
+///   仍按普通聊天处理；但「这周的时间分布」这类带时间/人称限定的裸数据问法
+///   属于明确查询意图，进入工作复盘（issue #179）。
 fn classify_standalone_assistant_request(
     question: &str,
 ) -> crate::agent::AssistantRequestClassification {
@@ -857,41 +904,7 @@ fn classify_standalone_assistant_request(
         || contains_ascii_word(&normalized, "i")
         || contains_ascii_word(&normalized, "my");
 
-    let local_data_signals = [
-        "工作记录",
-        "工作記錄",
-        "活动记录",
-        "活動記錄",
-        "屏幕记录",
-        "螢幕記錄",
-        "我的记录",
-        "我的記錄",
-        "应用使用",
-        "應用使用",
-        "时间分布",
-        "時間分布",
-        "时间占比",
-        "時間占比",
-        "前台应用",
-        "前台應用",
-        "工作会话",
-        "工作會話",
-        "工作段",
-        "时间线",
-        "時間線",
-        "日报",
-        "日報",
-        "周报",
-        "週報",
-        "工作总结",
-        "工作總結",
-        "work record",
-        "activity timeline",
-        "app usage",
-        "time breakdown",
-        "daily report",
-        "weekly report",
-    ];
+    let local_data_signals = LOCAL_DATA_TOPIC_SIGNALS;
     let local_data_access_signals = [
         "查看",
         "查询",
@@ -930,7 +943,7 @@ fn classify_standalone_assistant_request(
         "export",
         "generate",
     ];
-    let has_local_data = contains_any(&normalized, &local_data_signals);
+    let has_local_data = contains_any(&normalized, local_data_signals);
     let has_local_data_access = contains_any(&normalized, &local_data_access_signals);
     let is_template_or_concept_request = contains_any(
         &normalized,
@@ -952,6 +965,12 @@ fn classify_standalone_assistant_request(
             "怎麼實現",
             "如何实现",
             "如何實現",
+            "怎么写",
+            "怎麼寫",
+            "如何写",
+            "如何寫",
+            "范文",
+            "範文",
             "怎么排查",
             "怎麼排查",
             "如何排查",
@@ -1438,10 +1457,20 @@ fn classify_standalone_assistant_request(
         && !is_template_or_concept_request;
     let implicit_recent_review = ambiguous_recent_review && !has_external_topic;
 
+    // 裸数据名词问法（issue #179）：「这周的时间分布」没有访问动词，但时间范围或
+    // 第一人称 + 本机数据词的组合已经是明确的数据查询意图，不应落入普通聊天后被
+    // 模型答成"没有权限读取记录"。外部主题（新闻/影视/技术词等）与概念、模板问法
+    // 仍然排除，维持"模糊通用词不授权本机数据"的边界。
+    let bare_local_data_query = has_local_data
+        && (has_period || has_personal_scope)
+        && !has_external_topic
+        && !is_template_or_concept_request;
+
     if explicit_personal_review
         || scoped_implicit_review
         || explicit_period_work_summary
         || implicit_recent_review
+        || bare_local_data_query
     {
         return AssistantRequestClassification::work_review(false);
     }
@@ -1561,6 +1590,7 @@ fn build_assistant_request_system_prompt<F>(
     mode: crate::agent::AssistantRequestMode,
     assistant_memory_enabled: bool,
     user_memory_prompt: Option<&str>,
+    mentions_local_data: bool,
     realtime_context: F,
 ) -> String
 where
@@ -1568,13 +1598,29 @@ where
 {
     use crate::agent::AssistantRequestMode;
 
+    // GeneralChat 兜底（issue #179）：问题提及本机数据词但未被授权读取时，
+    // 明确告知模型"数据存在但当前模式接不上"，防止弱模型编造"没有权限读取
+    // 日历/日志"或引导用户手动粘贴数据等幻觉话术。
+    let general_local_data_hint = match locale {
+        AppLocale::ZhCn => "\n\n[本机数据说明] 本应用保存了用户本机的工作记录（时间线、应用与网站使用、日报等），但当前普通聊天模式未接入这些数据。不要虚构或否认任何读取权限，也不要让用户手动粘贴记录；如果用户想查询这类数据，建议换用更明确的问法（例如「总结我今天的工作」「查看我这周的时间分布」），应用会自动读取本机记录作答。",
+        AppLocale::ZhTw => "\n\n[本機資料說明] 本應用保存了使用者本機的工作記錄（時間線、應用與網站使用、日報等），但目前一般聊天模式未接入這些資料。不要虛構或否認任何讀取權限，也不要請使用者手動貼上記錄；如果使用者想查詢這類資料，建議改用更具體的問法（例如「總結我今天的工作」「查看我這週的時間分布」），應用會自動讀取本機記錄作答。",
+        AppLocale::En => "\n\n[Local data note] This app stores the user's local work records (timeline, app & website usage, daily reports), but this general-chat mode has no access to them. Never invent or deny read permissions, and never ask the user to paste records manually; if the user wants such data, suggest more explicit phrasing (e.g. \"Summarize my work today\", \"Show my time breakdown this week\") and the app will read local records automatically.",
+        AppLocale::Ar => "\n\n[ملاحظة البيانات المحلية] يخزّن هذا التطبيق سجلات عمل المستخدم المحلية (الخط الزمني، استخدام التطبيقات والمواقع، التقارير اليومية)، لكن وضع الدردشة العام الحالي لا يتصل بها. لا تخترع أذونات قراءة أو تنكرها، ولا تطلب من المستخدم لصق السجلات يدويًا؛ إذا أراد المستخدم هذه البيانات، اقترح صياغة أوضح (مثل «لخّص عملي اليوم» أو «اعرض توزيع وقتي هذا الأسبوع») وسيقرأ التطبيق السجلات المحلية تلقائيًا.",
+    };
+
     match mode {
-        AssistantRequestMode::GeneralChat => match locale {
-            AppLocale::ZhCn => "你是一个通用对话助手，当前进行普通聊天。直接回答用户当前问题，并使用与用户相同的语言。问题依赖实时外部信息时，仅在联网能力可用时查询；不可用时明确说明限制。不要虚构事实。".to_string(),
-            AppLocale::ZhTw => "你是一個通用對話助手，目前進行一般聊天。直接回答使用者目前的問題，並使用與使用者相同的語言。問題依賴即時外部資訊時，僅在連網能力可用時查詢；不可用時明確說明限制。不要虛構事實。".to_string(),
-            AppLocale::En => "You are a general-purpose conversational assistant. Answer the user's current question directly and in the same language as the user. When the question depends on real-time external information, look it up only when network access is available; otherwise state the limitation clearly. Do not invent facts.".to_string(),
-            AppLocale::Ar => "أنت مساعد محادثة عام. أجب مباشرة عن سؤال المستخدم الحالي وباللغة نفسها التي يستخدمها. عندما يعتمد السؤال على معلومات خارجية لحظية، ابحث عنها فقط إذا كان الاتصال بالشبكة متاحًا؛ وإلا فاذكر هذا القيد بوضوح. لا تختلق حقائق.".to_string(),
-        },
+        AssistantRequestMode::GeneralChat => {
+            let mut prompt = match locale {
+                AppLocale::ZhCn => "你是一个通用对话助手，当前进行普通聊天。直接回答用户当前问题，并使用与用户相同的语言。问题依赖实时外部信息时，仅在联网能力可用时查询；不可用时明确说明限制。不要虚构事实。".to_string(),
+                AppLocale::ZhTw => "你是一個通用對話助手，目前進行一般聊天。直接回答使用者目前的問題，並使用與使用者相同的語言。問題依賴即時外部資訊時，僅在連網能力可用時查詢；不可用時明確說明限制。不要虛構事實。".to_string(),
+                AppLocale::En => "You are a general-purpose conversational assistant. Answer the user's current question directly and in the same language as the user. When the question depends on real-time external information, look it up only when network access is available; otherwise state the limitation clearly. Do not invent facts.".to_string(),
+                AppLocale::Ar => "أنت مساعد محادثة عام. أجب مباشرة عن سؤال المستخدم الحالي وباللغة نفسها التي يستخدمها. عندما يعتمد السؤال على معلومات خارجية لحظية، ابحث عنها فقط إذا كان الاتصال بالشبكة متاحًا؛ وإلا فاذكر هذا القيد بوضوح. لا تختلق حقائق.".to_string(),
+            };
+            if mentions_local_data {
+                prompt.push_str(general_local_data_hint);
+            }
+            prompt
+        }
         AssistantRequestMode::WorkReview => {
             let mut prompt = build_assistant_system_prompt(locale);
             prompt.push_str(match locale {
@@ -2436,6 +2482,7 @@ pub async fn chat_work_assistant(
         request_mode,
         assistant_memory_enabled,
         user_memory_prompt.as_deref(),
+        mentions_local_data_topic(&trimmed_question),
         || build_realtime_context_text(&state_arc),
     );
     let result = crate::agent::tools::with_user_memory_tool_capabilities(
@@ -2499,6 +2546,80 @@ pub async fn generate_text_with_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 时间或人称限定的裸数据问法应进入工作复盘() {
+        for question in [
+            "这周的时间分布",
+            "這週的時間分布",
+            "本周时间分布",
+            "这周我的时间分布",
+            "我的时间线",
+            "最近应用使用有哪些？",
+        ] {
+            assert_eq!(
+                classify_assistant_request_mode(question, &[]),
+                crate::agent::AssistantRequestMode::WorkReview,
+                "带时间/人称限定的裸数据问法不应被当成普通聊天: {question}"
+            );
+        }
+    }
+
+    #[test]
+    fn 概念写作与外部主题问法不得因数据词加时间词而误入工作复盘() {
+        for question in [
+            "时间分布是什么？",
+            "日报和周报有什么区别？",
+            "帮我写一份周报模板",
+            "最近日报怎么写？",
+            "这周工作总结范文",
+            "这周的新闻时间线",
+        ] {
+            assert_eq!(
+                classify_assistant_request_mode(question, &[]),
+                crate::agent::AssistantRequestMode::GeneralChat,
+                "概念/写作/外部主题问法不应触发本机数据读取: {question}"
+            );
+        }
+    }
+
+    #[test]
+    fn 普通聊天提及本机数据时应注入引导说明避免模型虚构权限() {
+        assert!(mentions_local_data_topic("这周的时间分布"));
+        assert!(mentions_local_data_topic("帮我看看 daily report"));
+        assert!(!mentions_local_data_topic("今天天气怎么样？"));
+
+        let with_hint = build_assistant_request_system_prompt(
+            AppLocale::ZhCn,
+            crate::agent::AssistantRequestMode::GeneralChat,
+            false,
+            None,
+            true,
+            || "当前前台应用: Code".to_string(),
+        );
+        assert!(with_hint.contains("[本机数据说明]"));
+        assert!(with_hint.contains("不要让用户手动粘贴记录"));
+
+        let without_hint = build_assistant_request_system_prompt(
+            AppLocale::ZhCn,
+            crate::agent::AssistantRequestMode::GeneralChat,
+            false,
+            None,
+            false,
+            || "当前前台应用: Code".to_string(),
+        );
+        assert!(!without_hint.contains("[本机数据说明]"));
+
+        let english = build_assistant_request_system_prompt(
+            AppLocale::En,
+            crate::agent::AssistantRequestMode::GeneralChat,
+            false,
+            None,
+            true,
+            String::new,
+        );
+        assert!(english.contains("[Local data note]"));
+    }
 
     /// system prompt 必须包含真实固定的工具历史摘要格式（每个 locale 都要有）。
     /// 防回归：之前这声明曾误加在 executor.rs 的 DEFAULT_SYSTEM_PROMPT，但生产路径
@@ -3528,6 +3649,7 @@ mod tests {
             crate::agent::AssistantRequestMode::GeneralChat,
             false,
             None,
+            false,
             || {
                 collected.set(true);
                 "当前前台应用: Code — secret-project\n今日概况: 8 小时".to_string()
@@ -3547,6 +3669,7 @@ mod tests {
             crate::agent::AssistantRequestMode::GeneralChat,
             true,
             Some("[用户确认的长期记忆]\nsecret\n[/用户确认的长期记忆]"),
+            false,
             || "当前前台应用: Code".to_string(),
         );
 
@@ -3577,6 +3700,7 @@ mod tests {
             crate::agent::AssistantRequestMode::WorkReview,
             false,
             None,
+            false,
             || "当前前台应用: Code — secret-project\n今日概况: 8 小时".to_string(),
         );
 

@@ -1139,9 +1139,15 @@ pub(crate) fn resolve_activity_classification(
         }
     }
 
+    // 与网站统计、历史回填共用域名来源；没有地址栏 URL 时仍可按标题匹配规则。
+    let browser_page_hint = if work_review_core::categorize::is_browser_app(app_name) {
+        work_review_core::categorize::resolve_browser_page_hint(browser_url, window_title, None)
+    } else {
+        None
+    };
     if let Some(semantic_category) = work_review_core::categorize::find_website_semantic_override(
         &config.website_semantic_rules,
-        browser_url,
+        browser_page_hint.as_deref(),
     ) {
         classification.base_category =
             work_review_core::categorize::semantic_category_to_base_category(
@@ -2938,10 +2944,17 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
                                             let filtered_text =
                                                 ocr::filter_sensitive_text(&ocr_result.text);
                                             if let Ok(state_guard) = state_clone.lock() {
-                                                let _ = state_guard.database.update_activity_ocr(
-                                                    latest_id,
-                                                    Some(filtered_text),
-                                                );
+                                                if let Err(error) =
+                                                    state_guard.database.update_activity_ocr(
+                                                        latest_id,
+                                                        Some(filtered_text),
+                                                        &state_guard.config.website_semantic_rules,
+                                                    )
+                                                {
+                                                    log::warn!(
+                                                        "保存 OCR 与网站分类失败(合并): {error}"
+                                                    );
+                                                }
                                                 log::info!(
                                                     "OCR 完成(合并): 活动 {} 识别到 {} 个字符",
                                                     latest_id,
@@ -3135,12 +3148,18 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
                                                             );
                                                         if let Ok(state_guard) = state_clone.lock()
                                                         {
-                                                            let _ = state_guard
+                                                            if let Err(error) = state_guard
                                                                 .database
                                                                 .update_activity_ocr(
                                                                     activity_id,
                                                                     Some(filtered_text),
-                                                                );
+                                                                    &state_guard
+                                                                        .config
+                                                                        .website_semantic_rules,
+                                                                )
+                                                            {
+                                                                log::warn!("保存 OCR 与网站分类失败(新建): {error}");
+                                                            }
                                                             log::info!(
                                                         "OCR 完成(新建): 活动 {} 识别到 {} 个字符",
                                                         activity_id,
@@ -4968,6 +4987,54 @@ mod tests {
 
         assert_eq!(classification.base_category, "browser");
         assert_eq!(classification.semantic_category, "任务规划");
+    }
+
+    #[test]
+    fn 网站规则应在浏览器网址缺失或不可用时匹配标题() {
+        let mut config = AppConfig::default();
+        config.website_semantic_rules = vec![WebsiteSemanticRule {
+            domain: "github.com".to_string(),
+            semantic_category: "休息娱乐".to_string(),
+        }];
+        config.normalize();
+
+        for browser_url in [None, Some("  "), Some("https://linux.dolatest")] {
+            let classification = resolve_activity_classification(
+                &config,
+                "Google Chrome",
+                "github.com - Google Chrome",
+                browser_url,
+            );
+            assert_eq!(classification.base_category, "entertainment");
+            assert_eq!(classification.semantic_category, "休息娱乐");
+            assert_eq!(classification.confidence, 100);
+        }
+    }
+
+    #[test]
+    fn 网站规则不应因标题提到域名而覆盖其它网站或普通应用() {
+        let mut config = AppConfig::default();
+        config.website_semantic_rules = vec![WebsiteSemanticRule {
+            domain: "github.com".to_string(),
+            semantic_category: "休息娱乐".to_string(),
+        }];
+        config.normalize();
+
+        for (app_name, browser_url) in [
+            ("Google Chrome", Some("https://docs.github.com/guide")),
+            ("Visual Studio Code", None),
+        ] {
+            let classification = resolve_activity_classification(
+                &config,
+                app_name,
+                "github.com - 项目文档",
+                browser_url,
+            );
+            assert!(!classification
+                .evidence
+                .iter()
+                .any(|evidence| evidence.starts_with("命中网站语义规则:")));
+        }
     }
 
     #[test]

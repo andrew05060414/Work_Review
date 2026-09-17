@@ -126,6 +126,7 @@ export default {
       saving: 'Saving...',
       autoDetected: 'Auto',
       domainSemanticUpdated: '{domain} is now "{category}" and {count} historical records were synced',
+      domainSemanticSavedWithoutHistory: 'Saved the "{category}" category rule for {domain}; no historical records were found to sync',
       domainSemanticUpdateFailed: 'Failed to update semantic category for {domain}: {error}',
       createSemanticCategory: 'New Category',
       semanticCategoryNamePlaceholder: 'Category name',

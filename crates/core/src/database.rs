@@ -435,8 +435,10 @@ pub fn encode_embedding(vector: &[f32]) -> Vec<u8> {
 
 /// BLOB → f32 向量（长度非 4 的倍数时丢弃尾部残字节）。
 pub fn decode_embedding(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    blob.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect()
 }
 
@@ -1355,17 +1357,62 @@ impl Database {
         Ok(())
     }
 
-    /// 更新活动的 OCR 文本
-    pub fn update_activity_ocr(&self, id: i64, ocr_text: Option<String>) -> Result<()> {
+    /// 更新活动的 OCR 文本，并让异步识别出的浏览器页面应用最新网站分类规则。
+    pub fn update_activity_ocr(
+        &self,
+        id: i64,
+        ocr_text: Option<String>,
+        website_rules: &[crate::config::WebsiteSemanticRule],
+    ) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| {
             AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
         })?;
+        let tx = conn.unchecked_transaction()?;
 
-        conn.execute(
+        tx.execute(
             "UPDATE activities SET ocr_text = ?1 WHERE id = ?2",
             params![ocr_text, id],
         )?;
 
+        if !website_rules.is_empty() {
+            let activity: Option<(String, String, Option<String>, String)> = tx
+                .query_row(
+                    "SELECT app_name, window_title, browser_url, category
+                     FROM activities WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+
+            if let Some((app_name, window_title, browser_url, category)) = activity {
+                if crate::categorize::is_browser_app(&app_name) {
+                    let page_hint = crate::categorize::resolve_browser_page_hint(
+                        browser_url.as_deref(),
+                        &window_title,
+                        ocr_text.as_deref(),
+                    );
+                    if let Some(semantic_category) =
+                        crate::categorize::find_website_semantic_override(
+                            website_rules,
+                            page_hint.as_deref(),
+                        )
+                    {
+                        let base_category = crate::categorize::semantic_category_to_base_category(
+                            &semantic_category,
+                            &category,
+                        );
+                        tx.execute(
+                            "UPDATE activities
+                             SET category = ?1, semantic_category = ?2, semantic_confidence = 100
+                             WHERE id = ?3",
+                            params![base_category, semantic_category, id],
+                        )?;
+                    }
+                }
+            }
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -1950,16 +1997,11 @@ impl Database {
                     .map(normalize_url)
                     .filter(|url| !url.is_empty());
 
-                let page_hint = normalized_browser_url
-                    .as_deref()
-                    .filter(|url| !crate::categorize::is_merged_domain(url))
-                    .map(|url| url.to_string())
-                    .or_else(|| crate::categorize::infer_browser_page_hint(&window_title))
-                    .or_else(|| {
-                        ocr_text
-                            .as_deref()
-                            .and_then(crate::categorize::infer_browser_page_hint_from_text)
-                    });
+                let page_hint = crate::categorize::resolve_browser_page_hint(
+                    browser_url.as_deref(),
+                    &window_title,
+                    ocr_text.as_deref(),
+                );
 
                 let (domain, page_hint) = match page_hint {
                     Some(page_hint) => (
@@ -2525,16 +2567,11 @@ impl Database {
                     .map(normalize_url)
                     .filter(|url| !url.is_empty());
 
-                let page_hint = normalized_browser_url
-                    .as_deref()
-                    .filter(|url| !crate::categorize::is_merged_domain(url))
-                    .map(|url| url.to_string())
-                    .or_else(|| crate::categorize::infer_browser_page_hint(&window_title))
-                    .or_else(|| {
-                        ocr_text
-                            .as_deref()
-                            .and_then(crate::categorize::infer_browser_page_hint_from_text)
-                    });
+                let page_hint = crate::categorize::resolve_browser_page_hint(
+                    browser_url.as_deref(),
+                    &window_title,
+                    ocr_text.as_deref(),
+                );
 
                 let (domain, page_hint) = match page_hint {
                     Some(page_hint) => (
@@ -3233,27 +3270,55 @@ impl Database {
             return Ok(Vec::new());
         };
 
-        let sql = format!(
-            "SELECT {ACTIVITY_SELECT_COLUMNS}
-             FROM activities
-             WHERE browser_url IS NOT NULL AND browser_url != '' AND browser_url LIKE ?1
-             ORDER BY timestamp ASC, id ASC"
-        );
-        let mut stmt = conn.prepare(&sql)?;
+        // 先流式读取轻量字段，仅在 URL 和标题均无法解析时读取单条 OCR。
+        // 不使用域名 LIKE 预筛选，以免标题推断或可疑 URL 兜底的表示形式被遗漏。
+        let mut candidates = conn.prepare(
+            "SELECT id, app_name, window_title, browser_url,
+                    ocr_text IS NOT NULL AND ocr_text != ''
+             FROM activities ORDER BY timestamp ASC, id ASC",
+        )?;
+        let mut ocr_query = conn.prepare("SELECT ocr_text FROM activities WHERE id = ?1")?;
+        let mut activity_query = conn.prepare(&format!(
+            "SELECT {ACTIVITY_SELECT_COLUMNS} FROM activities WHERE id = ?1"
+        ))?;
+        let mut rows = candidates.query([])?;
+        let mut activities = Vec::new();
 
-        let like_pattern = format!("%{}%", target);
-        let activities = stmt
-            .query_map([&like_pattern], activity_from_row)?
-            .filter_map(|row| row.ok())
-            .filter(|activity| {
-                activity
-                    .browser_url
-                    .as_deref()
-                    .and_then(crate::categorize::normalize_domain_rule)
-                    .as_deref()
-                    == Some(target.as_str())
-            })
-            .collect();
+        while let Some(row) = rows.next()? {
+            let app_name: String = row.get(1)?;
+            if !crate::categorize::is_browser_app(&app_name) {
+                continue;
+            }
+
+            let id: i64 = row.get(0)?;
+            let window_title: String = row.get(2)?;
+            let browser_url: Option<String> = row.get(3)?;
+            let page_hint = match crate::categorize::resolve_browser_page_hint(
+                browser_url.as_deref(),
+                &window_title,
+                None,
+            ) {
+                Some(page_hint) => Some(page_hint),
+                None if row.get::<_, bool>(4)? => {
+                    let ocr_text: Option<String> = ocr_query.query_row([id], |row| row.get(0))?;
+                    crate::categorize::resolve_browser_page_hint(
+                        browser_url.as_deref(),
+                        &window_title,
+                        ocr_text.as_deref(),
+                    )
+                }
+                None => None,
+            };
+
+            if page_hint
+                .as_deref()
+                .and_then(crate::categorize::normalize_domain_rule)
+                .as_deref()
+                == Some(target.as_str())
+            {
+                activities.push(activity_query.query_row([id], activity_from_row)?);
+            }
+        }
 
         Ok(activities)
     }
@@ -5002,6 +5067,16 @@ mod tests {
         safe_local_timestamp(ndt)
     }
 
+    fn in_memory_db() -> Database {
+        let db = Database {
+            conn: std::sync::Arc::new(std::sync::Mutex::new(
+                rusqlite::Connection::open_in_memory().expect("创建内存数据库失败"),
+            )),
+        };
+        db.init_tables().expect("初始化内存数据库失败");
+        db
+    }
+
     #[test]
     fn 补传查询应只返回近期缺远程url且有本地截图的记录() {
         let db_path = temp_db_path("backfill");
@@ -6733,6 +6808,373 @@ mod tests {
         }));
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn 网站历史回填应覆盖推断页面并与展示及工休统计一致() {
+        let db = in_memory_db();
+        let date = "2026-03-27";
+        let cases = [
+            (
+                "Chrome",
+                Some(" https://github.com:443/from-url/ "),
+                "other.example - Chrome",
+                Some("https://other.example"),
+            ),
+            (
+                "Arc",
+                None,
+                "github.com - Arc",
+                Some("https://other.example"),
+            ),
+            (
+                "Chrome",
+                Some(" \t\n "),
+                "github.com/from-title - Chrome",
+                None,
+            ),
+            (
+                "Safari",
+                Some(""),
+                "页面加载中",
+                Some("https://github.com/from-empty-url"),
+            ),
+            (
+                "Chrome",
+                None,
+                "页面加载中",
+                Some("当前页面 https://github.com/from-ocr"),
+            ),
+            (
+                "Chrome",
+                Some("https://linux.dolatest/"),
+                "github.com - Chrome",
+                None,
+            ),
+            (
+                "Chrome",
+                Some("linux.dolatest"),
+                "页面加载中",
+                Some("https://github.com/from-merged-url"),
+            ),
+            (
+                "Chrome",
+                Some("https://other.example/github.com"),
+                "github.com - Chrome",
+                Some("https://github.com"),
+            ),
+            (
+                "Chrome",
+                Some("https://docs.github.com/en"),
+                "github.com - Chrome",
+                Some("https://github.com"),
+            ),
+            (
+                "Code",
+                Some("https://github.com"),
+                "github.com",
+                Some("https://github.com"),
+            ),
+            ("Chrome", None, "页面加载中", None),
+            (
+                "Chrome",
+                None,
+                "docs.github.com - Chrome",
+                Some("https://github.com"),
+            ),
+        ];
+        let mut ids = Vec::new();
+
+        for (index, (app_name, browser_url, title, ocr_text)) in cases.iter().enumerate() {
+            let id = db
+                .insert_activity(&Activity {
+                    id: None,
+                    timestamp: local_ts(date, 10, index as u32 + 1),
+                    app_name: (*app_name).to_string(),
+                    window_title: (*title).to_string(),
+                    screenshot_path: format!("domain-{index}.jpg"),
+                    ocr_text: ocr_text.map(str::to_string),
+                    category: "browser".to_string(),
+                    duration: 60,
+                    browser_url: browser_url.map(str::to_string),
+                    executable_path: None,
+                    semantic_category: Some("资料阅读".to_string()),
+                    semantic_confidence: Some(70),
+                    screenshot_url: None,
+                })
+                .expect("插入浏览器分类测试数据失败");
+            // 保留旧数据库可能存在的空白和尾斜杠，避免被插入接口提前规范化。
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE activities SET browser_url = ?1 WHERE id = ?2",
+                    params![browser_url, id],
+                )
+                .expect("还原历史网址格式失败");
+            ids.push(id);
+        }
+
+        let matched = db
+            .get_activities_by_domain(" HTTPS://GITHUB.COM:443/settings ")
+            .expect("读取网站历史失败");
+        assert_eq!(
+            matched
+                .iter()
+                .map(|activity| activity.id.unwrap())
+                .collect::<Vec<_>>(),
+            ids[..7]
+        );
+        assert!(db.get_activities_by_domain(" ").unwrap().is_empty());
+
+        let before = db.get_daily_stats(date).expect("读取回填前统计失败");
+        let domain = before
+            .domain_usage
+            .iter()
+            .find(|item| item.domain == "github.com")
+            .expect("推断页面应出现在网站统计中");
+        assert_eq!(
+            domain.duration,
+            matched
+                .iter()
+                .map(|activity| activity.duration)
+                .sum::<i64>()
+        );
+        assert_eq!(before.work_time_duration, 12 * 60);
+
+        for activity in matched {
+            let base_category = crate::categorize::semantic_category_to_base_category(
+                "休息娱乐",
+                &activity.category,
+            );
+            db.update_activity_classification(
+                activity.id.unwrap(),
+                &base_category,
+                Some("休息娱乐"),
+                Some(100),
+            )
+            .expect("回填网站分类失败");
+        }
+
+        let after = db.get_daily_stats(date).expect("读取回填后统计失败");
+        assert_eq!(after.total_duration, before.total_duration);
+        assert_eq!(after.work_time_duration, 5 * 60);
+        assert_eq!(
+            after
+                .category_usage
+                .iter()
+                .find(|item| item.category == "entertainment")
+                .map(|item| item.duration),
+            Some(7 * 60)
+        );
+        assert_eq!(
+            after
+                .domain_usage
+                .iter()
+                .find(|item| item.domain == "github.com")
+                .and_then(|item| item.semantic_category.as_deref()),
+            Some("休息娱乐")
+        );
+        assert!(after
+            .browser_usage
+            .iter()
+            .flat_map(|browser| &browser.domains)
+            .filter(|item| item.domain == "github.com")
+            .all(|item| item.semantic_category.as_deref() == Some("休息娱乐")));
+
+        let excluded = ["github.com".to_string()];
+        let filtered = db
+            .get_daily_stats_with_segments_filtered(date, &[], &[], &excluded)
+            .expect("读取过滤后的每日统计失败");
+        let hours = db
+            .get_hourly_app_breakdown_range_filtered(date, date, &[], &excluded)
+            .expect("读取过滤后的小时统计失败");
+        // 隐私过滤包含子域，但普通应用中的网址仍不参与浏览器网站过滤。
+        assert_eq!(filtered.total_duration, 3 * 60);
+        assert_eq!(hours[10].total_duration, filtered.total_duration);
+    }
+
+    #[test]
+    fn 网站历史读取错误不应被当作零条匹配吞掉() {
+        let db = in_memory_db();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO activities (timestamp, app_name, window_title, screenshot_path,
+             category, duration, browser_url)
+             VALUES (1, 'Chrome', 'GitHub', '', X'FF', 60, 'https://github.com')",
+                [],
+            )
+            .expect("插入损坏分类测试数据失败");
+        assert!(db.get_activities_by_domain("github.com").is_err());
+
+        let db = in_memory_db();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO activities (timestamp, app_name, window_title, screenshot_path,
+             category, duration, ocr_text)
+             VALUES (1, 'Chrome', '页面加载中', '', 'browser', 60, X'FF')",
+                [],
+            )
+            .expect("插入损坏 OCR 测试数据失败");
+        assert!(db.get_activities_by_domain("github.com").is_err());
+    }
+
+    #[test]
+    fn 异步ocr应补充网站规则分类并尊重网址标题和应用边界() {
+        let db = in_memory_db();
+        let rules = [crate::config::WebsiteSemanticRule {
+            domain: "github.com".to_string(),
+            semantic_category: "休息娱乐".to_string(),
+        }];
+        let date = "2026-03-27";
+        let cases = [
+            (
+                "Chrome",
+                None,
+                "页面加载中",
+                "https://github.com/page",
+                true,
+            ),
+            (
+                "Chrome",
+                Some("https://other.example"),
+                "github.com - Chrome",
+                "https://github.com/page",
+                false,
+            ),
+            (
+                "Chrome",
+                Some("https://github.com"),
+                "other.example - Chrome",
+                "https://other.example/page",
+                true,
+            ),
+            (
+                "Chrome",
+                None,
+                "other.example - Chrome",
+                "https://github.com/page",
+                false,
+            ),
+            ("Code", None, "页面加载中", "https://github.com/page", false),
+            (
+                "Chrome",
+                Some("linux.dolatest"),
+                "页面加载中",
+                "https://github.com/page",
+                true,
+            ),
+            (
+                "Chrome",
+                None,
+                "页面加载中",
+                "https://other.example/page",
+                false,
+            ),
+        ];
+
+        for (index, (app_name, browser_url, title, ocr_text, should_override)) in
+            cases.iter().enumerate()
+        {
+            let id = db
+                .insert_activity(&Activity {
+                    id: None,
+                    timestamp: local_ts(date, 10, index as u32 + 1),
+                    app_name: (*app_name).to_string(),
+                    window_title: (*title).to_string(),
+                    screenshot_path: format!("ocr-{index}.jpg"),
+                    ocr_text: None,
+                    category: "browser".to_string(),
+                    duration: 60,
+                    browser_url: browser_url.map(str::to_string),
+                    executable_path: None,
+                    semantic_category: Some("资料阅读".to_string()),
+                    semantic_confidence: Some(70),
+                    screenshot_url: None,
+                })
+                .expect("插入异步 OCR 测试数据失败");
+
+            db.update_activity_ocr(id, Some((*ocr_text).to_string()), &rules)
+                .expect("更新 OCR 和网站分类失败");
+            let activity = db
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    &format!(
+                        "SELECT {} FROM activities WHERE id = ?1",
+                        super::ACTIVITY_SELECT_COLUMNS
+                    ),
+                    [id],
+                    super::activity_from_row,
+                )
+                .expect("读取 OCR 更新后的活动失败");
+            assert_eq!(activity.ocr_text.as_deref(), Some(*ocr_text));
+            assert_eq!(activity.browser_url.as_deref(), *browser_url);
+            assert_eq!(
+                activity.category,
+                if *should_override {
+                    "entertainment"
+                } else {
+                    "browser"
+                }
+            );
+            assert_eq!(
+                activity.semantic_category.as_deref(),
+                Some(if *should_override {
+                    "休息娱乐"
+                } else {
+                    "资料阅读"
+                })
+            );
+            assert_eq!(
+                activity.semantic_confidence,
+                Some(if *should_override { 100 } else { 70 })
+            );
+        }
+
+        let stats = db
+            .get_daily_stats(date)
+            .expect("读取 OCR 补分类后的统计失败");
+        assert_eq!(stats.total_duration, 7 * 60);
+        assert_eq!(stats.work_time_duration, 4 * 60);
+    }
+
+    #[test]
+    fn 异步ocr分类写入失败应回滚ocr文本() {
+        let db = in_memory_db();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO activities (id, timestamp, app_name, window_title, screenshot_path,
+             category, duration, ocr_text)
+             VALUES (1, 1, 'Chrome', '页面加载中', '', 'browser', 60, '旧文本');
+             CREATE TRIGGER reject_classification BEFORE UPDATE OF category ON activities
+             BEGIN SELECT RAISE(ABORT, '分类更新失败'); END;",
+            )
+            .expect("初始化回滚测试数据失败");
+        let rules = [crate::config::WebsiteSemanticRule {
+            domain: "github.com".to_string(),
+            semantic_category: "休息娱乐".to_string(),
+        }];
+
+        assert!(db
+            .update_activity_ocr(1, Some("https://github.com".to_string()), &rules)
+            .is_err());
+        let ocr_text: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT ocr_text FROM activities WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("读取回滚后的 OCR 失败");
+        assert_eq!(ocr_text, "旧文本");
     }
 
     #[test]

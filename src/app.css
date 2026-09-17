@@ -4106,15 +4106,21 @@
   background: rgba(13, 17, 23, 0.5);
 }
 
-/* 关于页：品牌、原则与技术栈共用居中阅读轴。 */
+/* 关于页：品牌、原则与技术栈共用居中阅读轴。
+   外壳撑满可视高度，主体在页头下方自适应垂直居中，
+   避免窗口最大化后空白全部堆积在页面底部。 */
 .about-editorial-shell {
   min-height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .about-minimal-shell {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 1rem;
 }
 

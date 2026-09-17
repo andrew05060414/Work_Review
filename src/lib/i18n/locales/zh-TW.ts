@@ -125,6 +125,7 @@ export default {
       saving: '儲存中...',
       autoDetected: '自動識別',
       domainSemanticUpdated: '已將 {domain} 設為「{category}」，並同步 {count} 條歷史記錄',
+      domainSemanticSavedWithoutHistory: '已儲存 {domain} 的「{category}」分類規則，未找到可同步的歷史記錄',
       domainSemanticUpdateFailed: '修改 {domain} 的網站語義分類失敗: {error}',
       createSemanticCategory: '新建分類',
       semanticCategoryNamePlaceholder: '分類名稱',
