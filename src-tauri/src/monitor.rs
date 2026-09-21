@@ -1713,11 +1713,10 @@ mod tests {
         firefox_family_profile_dir_from_ini, is_current_process_owner,
         normalize_macos_frontmost_app_name, parse_gnome_focused_window_dbus_output,
         parse_hyprland_window_bounds, parse_kdotool_geometry_output,
-        parse_macos_window_bounds_fields, parse_xdotool_geometry_shell_output,
-        resolve_browser_url_for_window_linux, should_run_windows_browser_url_fallback,
-        strip_not_responding_suffix, BrowserUrlCacheKey, BrowserUrlProtection,
-        BrowserUrlProtectionConfig, BrowserUrlQueryDecision, BrowserUrlQueryTicket, LatestOnlySlot,
-        WindowBounds,
+        parse_xdotool_geometry_shell_output, resolve_browser_url_for_window_linux,
+        should_run_windows_browser_url_fallback, strip_not_responding_suffix, BrowserUrlCacheKey,
+        BrowserUrlProtection, BrowserUrlProtectionConfig, BrowserUrlQueryDecision,
+        BrowserUrlQueryTicket, LatestOnlySlot, WindowBounds,
     };
     use std::path::Path;
     #[cfg(target_os = "macos")]
@@ -2014,19 +2013,6 @@ mod tests {
         assert_eq!(slot.replace(2), Some(1));
         assert_eq!(slot.take(), Some(2));
         assert_eq!(slot.take(), None);
-    }
-
-    #[test]
-    fn macos前台窗口坐标字段应解析为窗口边界() {
-        assert_eq!(
-            parse_macos_window_bounds_fields(Some("1512"), Some("64"), Some("1512"), Some("982"),),
-            Some(WindowBounds {
-                x: 1512,
-                y: 64,
-                width: 1512,
-                height: 982,
-            })
-        );
     }
 
     #[test]
@@ -2514,118 +2500,242 @@ pub fn get_active_window_fast() -> Result<ActiveWindow> {
     get_active_window_with_options(false)
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn parse_macos_window_bounds_fields(
-    x: Option<&str>,
-    y: Option<&str>,
-    width: Option<&str>,
-    height: Option<&str>,
-) -> Option<WindowBounds> {
-    let x = x?.trim().parse::<i32>().ok()?;
-    let y = y?.trim().parse::<i32>().ok()?;
-    let width = width?.trim().parse::<u32>().ok()?;
-    let height = height?.trim().parse::<u32>().ok()?;
+/// AXUIElement / HIServices 最小绑定：仅覆盖前台窗口的标题与几何信息。
+/// 权限要求与原 System Events 脚本一致（辅助功能），不新增授权弹窗。
+/// 见 #181：每次 fork osascript 会被 LaunchServices 按 bundle 环境登记成短命的
+/// "Work_Review" 应用，导致 Dock 图标每轮闪烁，故改为进程内原生采集。
+#[cfg(target_os = "macos")]
+mod macos_ax {
+    use core_foundation::base::CFTypeRef;
+    use core_foundation::string::CFStringRef;
 
-    if width == 0 || height == 0 {
-        return None;
+    pub type AXUIElementRef = CFTypeRef;
+    pub type AXValueRef = CFTypeRef;
+    /// 0 = kAXErrorSuccess
+    pub type AXError = i32;
+
+    // kAXValueCGPointType / kAXValueCGSizeType
+    #[repr(i32)]
+    pub enum AXValueType {
+        CGPointType = 1,
+        CGSizeType = 2,
     }
 
-    Some(WindowBounds {
-        x,
-        y,
-        width,
-        height,
-    })
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct AxPoint {
+        pub x: f64,
+        pub y: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct AxSize {
+        pub width: f64,
+        pub height: f64,
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        pub fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+        pub fn AXUIElementCopyAttributeValue(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            value: *mut CFTypeRef,
+        ) -> AXError;
+        pub fn AXValueGetValue(
+            value: AXValueRef,
+            the_type: AXValueType,
+            value_ptr: *mut core::ffi::c_void,
+        ) -> bool;
+
+        pub static kAXFocusedWindowAttribute: CFStringRef;
+        pub static kAXTitleAttribute: CFStringRef;
+        pub static kAXPositionAttribute: CFStringRef;
+        pub static kAXSizeAttribute: CFStringRef;
+    }
+}
+
+/// NSRunningApplication 信息：(localizedName, bundleIdentifier, executableURL.path, pid)
+#[cfg(target_os = "macos")]
+fn frontmost_running_app_identity() -> Option<(String, Option<String>, Option<String>, i32)> {
+    use cocoa::base::{id, nil};
+
+    unsafe {
+        // 后台线程需自带 autorelease pool，避免 localizedName 等临时对象累积
+        let pool: id = msg_send![class!(NSAutoreleasePool), new];
+        let identity = (|| {
+            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let front: id = msg_send![workspace, frontmostApplication];
+            if front == nil {
+                return None;
+            }
+
+            let name = nsstring_to_string(msg_send![front, localizedName])?;
+            let bundle_identifier = nsstring_to_string(msg_send![front, bundleIdentifier]);
+            let executable_url: id = msg_send![front, executableURL];
+            let app_path = if executable_url != nil {
+                nsstring_to_string(msg_send![executable_url, path])
+            } else {
+                None
+            };
+            let pid: i32 = msg_send![front, processIdentifier];
+
+            Some((name, bundle_identifier, app_path, pid))
+        })();
+        let _: () = msg_send![pool, drain];
+        identity
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn nsstring_to_string(value: cocoa::base::id) -> Option<String> {
+    use std::ffi::CStr;
+
+    if value == cocoa::base::nil {
+        return None;
+    }
+    unsafe {
+        let utf8: *const std::os::raw::c_char = msg_send![value, UTF8String];
+        if utf8.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr(utf8).to_string_lossy().into_owned())
+    }
+}
+
+/// 读取 AX 属性值（Copy 规则，返回 +1 引用，调用方负责 CFRelease）
+#[cfg(target_os = "macos")]
+unsafe fn copy_ax_attribute(
+    element: macos_ax::AXUIElementRef,
+    attribute: core_foundation::string::CFStringRef,
+) -> Option<core_foundation::base::CFTypeRef> {
+    let mut value: core_foundation::base::CFTypeRef = std::ptr::null();
+    if macos_ax::AXUIElementCopyAttributeValue(element, attribute, &mut value) != 0 {
+        return None;
+    }
+    if value.is_null() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn with_ax_value<T>(
+    element: macos_ax::AXUIElementRef,
+    attribute: core_foundation::string::CFStringRef,
+    extract: impl FnOnce(macos_ax::AXValueRef) -> Option<T>,
+) -> Option<T> {
+    let value = copy_ax_attribute(element, attribute)?;
+    let result = extract(value as macos_ax::AXValueRef);
+    core_foundation::base::CFRelease(value);
+    result
+}
+
+/// 读取 pid 应用前台窗口的 (标题, bounds)。Accessibility 未授权或无窗口时静默降级为 ("", None)。
+#[cfg(target_os = "macos")]
+fn ax_focused_window_info(pid: i32) -> (String, Option<WindowBounds>) {
+    use core_foundation::base::CFRelease;
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+
+    unsafe {
+        let app_element = macos_ax::AXUIElementCreateApplication(pid);
+        if app_element.is_null() {
+            return (String::new(), None);
+        }
+
+        let window = match copy_ax_attribute(app_element, macos_ax::kAXFocusedWindowAttribute) {
+            Some(window) => window,
+            None => {
+                CFRelease(app_element);
+                return (String::new(), None);
+            }
+        };
+
+        let title = copy_ax_attribute(window, macos_ax::kAXTitleAttribute)
+            .map(|value| CFString::wrap_under_create_rule(value as _).to_string());
+
+        let position = with_ax_value(window, macos_ax::kAXPositionAttribute, |value| {
+            let mut point = macos_ax::AxPoint { x: 0.0, y: 0.0 };
+            macos_ax::AXValueGetValue(
+                value,
+                macos_ax::AXValueType::CGPointType,
+                &mut point as *mut _ as *mut core::ffi::c_void,
+            )
+            .then_some((point.x, point.y))
+        });
+
+        let size = with_ax_value(window, macos_ax::kAXSizeAttribute, |value| {
+            let mut size = macos_ax::AxSize {
+                width: 0.0,
+                height: 0.0,
+            };
+            macos_ax::AXValueGetValue(
+                value,
+                macos_ax::AXValueType::CGSizeType,
+                &mut size as *mut _ as *mut core::ffi::c_void,
+            )
+            .then_some((size.width, size.height))
+        });
+
+        CFRelease(window);
+        CFRelease(app_element);
+
+        let bounds = match (position, size) {
+            (Some((x, y)), Some((width, height))) if width > 0.0 && height > 0.0 => {
+                Some(WindowBounds {
+                    x: x.round() as i32,
+                    y: y.round() as i32,
+                    width: width.round() as u32,
+                    height: height.round() as u32,
+                })
+            }
+            _ => None,
+        };
+
+        (title.unwrap_or_default(), bounds)
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn get_active_window_with_options(include_browser_url: bool) -> Result<ActiveWindow> {
-    // 使用 AppleScript 获取活动应用信息
-    let script = r#"
-        tell application "System Events"
-            set frontApp to first application process whose frontmost is true
-            set appName to name of frontApp
-            set bundleId to ""
-            set appPath to ""
-            set windowTitle to ""
-            set windowX to ""
-            set windowY to ""
-            set windowWidth to ""
-            set windowHeight to ""
-            set sep to character id 31
-            try
-                set bundleId to bundle identifier of frontApp
-            end try
-            try
-                set appPath to POSIX path of (file of frontApp as alias)
-            end try
-            try
-                set windowTitle to name of front window of frontApp
-            end try
-            try
-                set {windowX, windowY} to position of front window of frontApp
-                set {windowWidth, windowHeight} to size of front window of frontApp
-            end try
-            return appName & sep & bundleId & sep & appPath & sep & windowTitle & sep & windowX & sep & windowY & sep & windowWidth & sep & windowHeight
-        end tell
-    "#;
+    let Some((raw_app_name, bundle_identifier, app_path, pid)) = frontmost_running_app_identity()
+    else {
+        return Err(AppError::Screenshot("获取活动窗口失败".to_string()));
+    };
 
-    let output = run_monitor_command_with_timeout(
-        Command::new("osascript").arg("-e").arg(script),
-        "macOS 活动窗口采集",
-    )
-    .map_err(|e| AppError::Screenshot(e.to_string()))?;
+    let (raw_window_title, ax_bounds) = ax_focused_window_info(pid);
 
-    if output.status.success() {
-        let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let parts: Vec<&str> = result.split('\u{1f}').collect();
+    // 对 Electron / Helper 类通用进程做名称还原，优先使用 app path / bundle id。
+    let app_name = normalize_macos_frontmost_app_name(
+        &raw_app_name,
+        &raw_window_title,
+        bundle_identifier.as_deref(),
+        app_path.as_deref(),
+    );
 
-        let raw_app_name = parts.first().copied().unwrap_or("Unknown").to_string();
-        let bundle_identifier = parts
-            .get(1)
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
-        let app_path = parts
-            .get(2)
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
-        let raw_window_title = parts.get(3).copied().unwrap_or("").to_string();
-        let window_bounds = parse_macos_window_bounds_fields(
-            parts.get(4).copied(),
-            parts.get(5).copied(),
-            parts.get(6).copied(),
-            parts.get(7).copied(),
-        )
-        .or_else(|| find_frontmost_window_bounds(&raw_app_name, &raw_window_title));
+    let window_title = clean_browser_window_title(&raw_window_title, &app_name);
 
-        // 对 Electron / Helper 类通用进程做名称还原，优先使用 app path / bundle id。
-        let app_name = normalize_macos_frontmost_app_name(
-            &raw_app_name,
-            &raw_window_title,
-            bundle_identifier,
-            app_path,
-        );
+    let window_bounds =
+        ax_bounds.or_else(|| find_frontmost_window_bounds(&raw_app_name, &raw_window_title));
 
-        let window_title = clean_browser_window_title(&raw_window_title, &app_name);
-
-        // 如果是浏览器，尝试获取 URL（使用原始标题，清理后的标题可能丢失 URL 信息）
-        let browser_url = if include_browser_url {
-            get_browser_url(&app_name, &raw_window_title)
-        } else {
-            None
-        };
-
-        Ok(ActiveWindow {
-            app_name,
-            window_title,
-            browser_url,
-            executable_path: app_path.map(str::to_string),
-            window_bounds,
-            is_minimized: false,
-        })
+    // 如果是浏览器，尝试获取 URL（使用原始标题，清理后的标题可能丢失 URL 信息）
+    let browser_url = if include_browser_url {
+        get_browser_url(&app_name, &raw_window_title)
     } else {
-        Err(AppError::Screenshot("获取活动窗口失败".to_string()))
-    }
+        None
+    };
+
+    Ok(ActiveWindow {
+        app_name,
+        window_title,
+        browser_url,
+        executable_path: app_path,
+        window_bounds,
+        is_minimized: false,
+    })
 }
 
 #[cfg(target_os = "macos")]
