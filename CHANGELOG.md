@@ -14,7 +14,7 @@ This is a release candidate for testing, not a stable release. Back up your data
 ### Fixed
 - Avoid opening or focusing a Windows Terminal window during background OCR and monitoring subprocesses. Windows PowerShell now runs non-interactively without `-WindowStyle`; background commands disconnect stdin, and the PaddleOCR Python worker uses `CREATE_NO_WINDOW` while retaining its protocol pipes.
 - Backfill canonical website categories for existing activity data and route assistant requests using explicit data intent.
-- Collect the active macOS application through `NSWorkspace` and `AXUIElement` instead of spawning `osascript` for each capture; link the Accessibility attribute constants from `HIServices` so both macOS architectures build.
+- Collect the active macOS application through `NSWorkspace` and `AXUIElement` instead of spawning `osascript` for each capture; construct Accessibility attribute names as Core Foundation strings so both macOS architectures link correctly.
 
 ### Validation Still Required
 - Build and inspect Windows, macOS, and Linux release packages through the release workflow.

@@ -2579,16 +2579,6 @@ mod macos_ax {
         ) -> bool;
 
     }
-
-    // Accessibility attribute constants are exported by HIServices rather than
-    // the ApplicationServices umbrella linked above.
-    #[link(name = "HIServices", kind = "framework")]
-    extern "C" {
-        pub static kAXFocusedWindowAttribute: CFStringRef;
-        pub static kAXTitleAttribute: CFStringRef;
-        pub static kAXPositionAttribute: CFStringRef;
-        pub static kAXSizeAttribute: CFStringRef;
-    }
 }
 
 /// NSRunningApplication 信息：(localizedName, bundleIdentifier, executableURL.path, pid)
@@ -2681,18 +2671,26 @@ fn ax_focused_window_info(pid: i32) -> (String, Option<WindowBounds>) {
             return (String::new(), None);
         }
 
-        let window = match copy_ax_attribute(app_element, macos_ax::kAXFocusedWindowAttribute) {
-            Some(window) => window,
-            None => {
-                CFRelease(app_element);
-                return (String::new(), None);
-            }
-        };
+        // Construct attribute names as CFStrings. The AX constants are declared by
+        // ApplicationServices but are not exported by its linker framework on current macOS.
+        let focused_window_attribute = CFString::new("AXFocusedWindow");
+        let title_attribute = CFString::new("AXTitle");
+        let position_attribute = CFString::new("AXPosition");
+        let size_attribute = CFString::new("AXSize");
 
-        let title = copy_ax_attribute(window, macos_ax::kAXTitleAttribute)
+        let window =
+            match copy_ax_attribute(app_element, focused_window_attribute.as_concrete_TypeRef()) {
+                Some(window) => window,
+                None => {
+                    CFRelease(app_element);
+                    return (String::new(), None);
+                }
+            };
+
+        let title = copy_ax_attribute(window, title_attribute.as_concrete_TypeRef())
             .map(|value| CFString::wrap_under_create_rule(value as _).to_string());
 
-        let position = with_ax_value(window, macos_ax::kAXPositionAttribute, |value| {
+        let position = with_ax_value(window, position_attribute.as_concrete_TypeRef(), |value| {
             let mut point = macos_ax::AxPoint { x: 0.0, y: 0.0 };
             macos_ax::AXValueGetValue(
                 value,
@@ -2702,7 +2700,7 @@ fn ax_focused_window_info(pid: i32) -> (String, Option<WindowBounds>) {
             .then_some((point.x, point.y))
         });
 
-        let size = with_ax_value(window, macos_ax::kAXSizeAttribute, |value| {
+        let size = with_ax_value(window, size_attribute.as_concrete_TypeRef(), |value| {
             let mut size = macos_ax::AxSize {
                 width: 0.0,
                 height: 0.0,
