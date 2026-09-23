@@ -80,11 +80,11 @@
   "identifier": "com.workreview.app",
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE5RTJFOUZBREEwMTA5RjIKUldUeUNRSGErdW5pcVdnajJvT3B2Vm9wdXlwb0QvVTBoQUZTTGYvSHJ2emhma3BWdnE3Q3dJTnkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaW5nIHB1YmxpYyBrZXk6IDFGNjRCQ0NDMUI5OTVGRgpSV1QvbGJuQnpFdjJBWlhsWTJXNlNGdWppdmtKcUNRWHhpUEtaT3FNOFFrd2hJMVVVQkFuQTEyTAo=",
       "endpoints": [
-        "https://github.com/wm94i/Work-Review/releases/latest/download/updater.json",
-        "https://gh-proxy.cn/https://github.com/wm94i/Work-Review/releases/latest/download/updater-ghproxy.json",
-        "https://gh-proxy.com/https://github.com/wm94i/Work-Review/releases/latest/download/updater-ghp.json"
+        "https://github.com/andrew05060414/Work_Review/releases/latest/download/updater.json",
+        "https://gh-proxy.cn/https://github.com/andrew05060414/Work_Review/releases/latest/download/updater-ghproxy.json",
+        "https://gh-proxy.com/https://github.com/andrew05060414/Work_Review/releases/latest/download/updater-ghp.json"
       ],
       "windows": {
         "installMode": "passive"
