@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3-rc.3] - 2026-09-22
+
+This is a release candidate for testing, not a stable release. Back up your data before installing. RC releases are not marked as Latest and are not offered through the stable automatic-update endpoint.
+
+### Fixed
+- Avoid opening or focusing a Windows Terminal window during background OCR and monitoring subprocesses. Windows PowerShell now runs non-interactively without `-WindowStyle`; background commands disconnect stdin, and the PaddleOCR Python worker uses `CREATE_NO_WINDOW` while retaining its protocol pipes.
+- Backfill canonical website categories for existing activity data and route assistant requests using explicit data intent.
+- Collect the active macOS application through `NSWorkspace` and `AXUIElement` instead of spawning `osascript` for each capture.
+
+### Validation Still Required
+- Build and inspect Windows, macOS, and Linux release packages through the release workflow.
+- Verify background Windows OCR and browser URL capture do not display or focus a console window; exercise PaddleOCR worker startup.
+- Validate macOS active-window collection, website-category backfill, and assistant data-intent routing with representative existing data and live app usage.
+- Complete installer launch and upgrade checks before promoting this candidate to a stable release.
+
 ## [1.1.3-rc.1] - 2026-09-05
 
 This is a release candidate for testing, not a stable release. Back up your data before installing, especially before testing data-directory migration. RC releases are not marked as Latest and are not offered through the stable automatic-update endpoint.

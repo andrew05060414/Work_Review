@@ -284,7 +284,10 @@ if __name__ == "__main__":
     }
 
     fn run_command_with_timeout(command: &mut Command, context: &str) -> Result<Output> {
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         let mut child = command
             .spawn()
@@ -658,8 +661,7 @@ try {{
             Command::new(&powershell_path)
                 .args([
                     "-NoProfile",
-                    "-WindowStyle",
-                    "Hidden",
+                    "-NonInteractive",
                     "-Sta",
                     "-ExecutionPolicy",
                     "Bypass",
@@ -869,6 +871,12 @@ impl PaddleWorkerClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
         model_config.apply_to_command(&mut command);
 
         let mut child = command
@@ -1637,6 +1645,35 @@ mod tests {
         }
         assert_eq!(native.matches("RecognizeAsync(").count(), 1);
         assert_eq!(native.matches("Command::new(").count(), 1);
+        assert!(native.contains("\"-NoProfile\""));
+        assert!(native.contains("\"-NonInteractive\""));
+        assert!(native.contains("\"-Sta\""));
+        assert!(native.contains("\"-ExecutionPolicy\""));
+        assert!(!native.contains("-WindowStyle"));
+        assert!(native.contains(".creation_flags(CREATE_NO_WINDOW)"));
+    }
+
+    #[test]
+    fn 后台子进程应断开标准输入且_python_worker在_windows无窗口启动() {
+        let source = include_str!("ocr.rs");
+        let runner = source
+            .split("fn run_command_with_timeout(")
+            .nth(1)
+            .unwrap()
+            .split("// 起线程持续排空")
+            .next()
+            .unwrap();
+        assert!(runner.contains(".stdin(Stdio::null())"));
+
+        let worker = source
+            .split("fn start(\n        python_cmd:")
+            .nth(1)
+            .unwrap()
+            .split("let mut child = command")
+            .next()
+            .unwrap();
+        assert!(worker.contains(".stdin(Stdio::piped())"));
+        assert!(worker.contains("command.creation_flags(CREATE_NO_WINDOW)"));
     }
 
     use super::{

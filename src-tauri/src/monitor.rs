@@ -46,7 +46,10 @@ const MONITOR_COMMAND_TIMEOUT: Duration = Duration::from_millis(1200);
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn run_monitor_command_with_timeout(command: &mut Command, context: &str) -> Result<Output> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = command
         .spawn()
@@ -1700,6 +1703,32 @@ fn get_url_via_uiautomation(hwnd: isize) -> Option<String> {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
+    #[test]
+    fn 后台命令应断开标准输入且_powershell使用无窗口参数() {
+        let source = include_str!("monitor.rs");
+        let runner = source
+            .split("fn run_monitor_command_with_timeout(")
+            .nth(1)
+            .unwrap()
+            .split("// 起线程持续排空")
+            .next()
+            .unwrap();
+        assert!(runner.contains(".stdin(Stdio::null())"));
+
+        let powershell = source
+            .split("fn get_url_via_powershell_uia(")
+            .nth(1)
+            .unwrap()
+            .split("/// 通过原生 UI Automation")
+            .next()
+            .unwrap();
+        for argument in ["-NoProfile", "-NonInteractive", "-Sta", "-ExecutionPolicy"] {
+            assert!(powershell.contains(argument));
+        }
+        assert!(!powershell.contains("-WindowStyle"));
+        assert!(powershell.contains(".creation_flags(CREATE_NO_WINDOW)"));
+    }
+
     #[cfg(target_os = "linux")]
     use super::firefox_family_session_store_base_dir;
     #[cfg(target_os = "macos")]
