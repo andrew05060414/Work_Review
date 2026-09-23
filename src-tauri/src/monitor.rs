@@ -2578,6 +2578,12 @@ mod macos_ax {
             value_ptr: *mut core::ffi::c_void,
         ) -> bool;
 
+    }
+
+    // Accessibility attribute constants are exported by HIServices rather than
+    // the ApplicationServices umbrella linked above.
+    #[link(name = "HIServices", kind = "framework")]
+    extern "C" {
         pub static kAXFocusedWindowAttribute: CFStringRef;
         pub static kAXTitleAttribute: CFStringRef;
         pub static kAXPositionAttribute: CFStringRef;
