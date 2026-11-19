@@ -8,6 +8,7 @@
 
   interface UpdateSettings {
     autoCheck: boolean;
+    includePrerelease: boolean;
     lastCheckTime: number;
     checkIntervalHours: number;
   }
@@ -19,6 +20,8 @@
   let appVersion = '';
   let isCheckingUpdate = false;
   let autoCheckUpdate = true;
+  let includePrerelease = false;
+  let isSavingUpdateSettings = false;
   let isSponsorshipOpen = false;
   let zoomedQr: string | null = null;
   let updateStatus = '';
@@ -37,20 +40,30 @@
     try {
       const settings = await invoke<UpdateSettings>('get_update_settings');
       autoCheckUpdate = settings?.autoCheck ?? true;
+      includePrerelease = settings?.includePrerelease ?? false;
     } catch (e) {
       console.error('读取更新设置失败:', e);
     }
   });
 
-  async function toggleAutoCheck() {
-    autoCheckUpdate = !autoCheckUpdate;
+  async function toggleUpdateSetting(key: 'autoCheck' | 'includePrerelease') {
+    if (isSavingUpdateSettings || isCheckingUpdate) return;
+    const previous = key === 'autoCheck' ? autoCheckUpdate : includePrerelease;
+    if (key === 'autoCheck') autoCheckUpdate = !previous;
+    else includePrerelease = !previous;
+    isSavingUpdateSettings = true;
     try {
       const settings = await invoke<UpdateSettings>('get_update_settings');
-      settings.autoCheck = autoCheckUpdate;
+      settings[key] = !previous;
       await invoke('save_update_settings', { settings });
+      updateStatus = '';
     } catch (e) {
       console.error('保存更新设置失败:', e);
-      autoCheckUpdate = !autoCheckUpdate;
+      if (key === 'autoCheck') autoCheckUpdate = previous;
+      else includePrerelease = previous;
+      updateStatus = t('about.updateSettingsSaveFailed');
+    } finally {
+      isSavingUpdateSettings = false;
     }
   }
 
@@ -75,12 +88,16 @@
   }
 
   async function checkForUpdates() {
-    if (isCheckingUpdate) return;
-
+    if (isCheckingUpdate || isSavingUpdateSettings) return;
+    if (updateStatusTimer !== null) {
+      clearTimeout(updateStatusTimer);
+      updateStatusTimer = null;
+    }
     isCheckingUpdate = true;
     updateStatus = t('about.checkingUpdates');
 
     await runUpdateFlow({
+      confirmBeforeDownload: true,
       onStatusChange: (status) => {
         updateStatus = status;
       },
@@ -101,7 +118,8 @@
   });
 
   function handleWindowKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Escape' && isSponsorshipOpen) {
+    if (event.key !== 'Escape') return;
+    if (isSponsorshipOpen) {
       closeSponsorshipModal();
     }
   }
@@ -163,50 +181,33 @@
         </button>
       </div>
 
-      <div class="about-update-grid mt-7 grid grid-cols-1 pt-5 sm:grid-cols-3">
-        <div class="about-update-unit flex min-h-20 flex-col items-center justify-center gap-2 px-4 py-3">
-          <span class="text-xs font-medium text-slate-400 dark:text-[#7d8590]">{t('about.currentVersionTag')}</span>
-          <strong class="text-sm font-semibold text-slate-700 dark:text-[#c9d1d9]">v{appVersion}</strong>
-        </div>
-
-        <div class="about-update-unit flex min-h-20 flex-col items-center justify-center gap-2 px-4 py-3">
-          <span class="text-xs font-medium text-slate-400 dark:text-[#7d8590]">{t('about.autoCheckUpdate')}</span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={autoCheckUpdate}
-            aria-label={t('about.autoCheckUpdate')}
-            title={t('about.autoCheckUpdate')}
-            on:click={toggleAutoCheck}
-            class="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200 {autoCheckUpdate ? 'bg-blue-500' : 'bg-slate-300 dark:bg-[#484f58]'}"
-          >
-            <span class="pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 dark:shadow-none {autoCheckUpdate ? 'translate-x-[18px]' : 'translate-x-[2px]'}"></span>
-          </button>
-        </div>
-
-        <div class="about-update-unit flex min-h-20 flex-col items-center justify-center gap-2 px-4 py-3">
-          <span class="text-xs font-medium text-slate-400 dark:text-[#7d8590]">{t('about.updateStatus')}</span>
-          <button
-            type="button"
-            on:click={checkForUpdates}
-            disabled={isCheckingUpdate}
-            class="page-control-btn min-h-9 px-3 disabled:opacity-50"
-          >
-            {#if isCheckingUpdate}
-              <svg class="h-3.5 w-3.5 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-              <span class="leading-none">{t('about.checkingUpdates')}</span>
-            {:else}
-              <svg class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-              <span class="leading-none">{t('about.checkUpdates')}</span>
-            {/if}
-          </button>
-        </div>
+      <div class="about-update-controls">
+        <label class="about-auto-check">
+          <input type="checkbox" checked={autoCheckUpdate} disabled={isSavingUpdateSettings || isCheckingUpdate} on:change={() => toggleUpdateSetting('autoCheck')} />
+          <span>{t('about.autoCheckUpdate')}</span>
+        </label>
+        <label class="about-auto-check" title={t('about.includePrereleaseHint')}>
+          <input type="checkbox" checked={includePrerelease} disabled={isSavingUpdateSettings || isCheckingUpdate} on:change={() => toggleUpdateSetting('includePrerelease')} />
+          <span>{t('about.includePrerelease')}</span>
+        </label>
+        <button
+          type="button"
+          on:click={checkForUpdates}
+          disabled={isCheckingUpdate || isSavingUpdateSettings}
+          aria-busy={isCheckingUpdate}
+          class="page-control-btn min-h-9 px-3 disabled:opacity-50"
+        >
+          {#if isCheckingUpdate}
+            <svg class="h-3.5 w-3.5 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+            <span class="leading-none">{t('about.checkingUpdates')}</span>
+          {:else}
+            <svg class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+            <span class="leading-none">{t('about.checkUpdates')}</span>
+          {/if}
+        </button>
       </div>
-
       {#if updateStatus}
-        <div class="about-update-feedback mt-4 text-center" role="status" aria-live="polite">
-          <p class="text-sm text-slate-500 dark:text-[#7d8590]">{updateStatus}</p>
-        </div>
+        <p class="about-update-feedback" role="status" aria-live="polite">{updateStatus}</p>
       {/if}
     </section>
 

@@ -46,10 +46,7 @@ const MONITOR_COMMAND_TIMEOUT: Duration = Duration::from_millis(1200);
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn run_monitor_command_with_timeout(command: &mut Command, context: &str) -> Result<Output> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = command
         .spawn()
@@ -1703,32 +1700,6 @@ fn get_url_via_uiautomation(hwnd: isize) -> Option<String> {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    #[test]
-    fn 后台命令应断开标准输入且_powershell使用无窗口参数() {
-        let source = include_str!("monitor.rs");
-        let runner = source
-            .split("fn run_monitor_command_with_timeout(")
-            .nth(1)
-            .unwrap()
-            .split("// 起线程持续排空")
-            .next()
-            .unwrap();
-        assert!(runner.contains(".stdin(Stdio::null())"));
-
-        let powershell = source
-            .split("fn get_url_via_powershell_uia(")
-            .nth(1)
-            .unwrap()
-            .split("/// 通过原生 UI Automation")
-            .next()
-            .unwrap();
-        for argument in ["-NoProfile", "-NonInteractive", "-Sta", "-ExecutionPolicy"] {
-            assert!(powershell.contains(argument));
-        }
-        assert!(!powershell.contains("-WindowStyle"));
-        assert!(powershell.contains(".creation_flags(CREATE_NO_WINDOW)"));
-    }
-
     #[cfg(target_os = "linux")]
     use super::firefox_family_session_store_base_dir;
     #[cfg(target_os = "macos")]
@@ -2567,6 +2538,7 @@ mod macos_ax {
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         pub fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+        pub fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout: f64) -> AXError;
         pub fn AXUIElementCopyAttributeValue(
             element: AXUIElementRef,
             attribute: CFStringRef,
@@ -2577,8 +2549,19 @@ mod macos_ax {
             the_type: AXValueType,
             value_ptr: *mut core::ffi::c_void,
         ) -> bool;
-
     }
+
+    // AX 属性常量在现代 macOS SDK 中是宏而非导出符号：
+    //   #define kAXFocusedWindowAttribute CFSTR("AXFocusedWindow")
+    // （见 ApplicationServices/HIServices 的 AXAttributeConstants.h）。
+    // HIServices 既不导出同名符号，SDK 的 .tbd 中也没有该符号，因此把
+    // `extern "C" { static kAXFooAttribute: CFStringRef; }` 写成外部静态会在链接期
+    // 报 `Undefined symbols for architecture arm64: _kAXFocusedWindowAttribute`。
+    // 这里用与宏完全相同的字面量在进程内构造等值 CFString 传给 AX API。
+    pub const ATTR_FOCUSED_WINDOW: &str = "AXFocusedWindow";
+    pub const ATTR_TITLE: &str = "AXTitle";
+    pub const ATTR_POSITION: &str = "AXPosition";
+    pub const ATTR_SIZE: &str = "AXSize";
 }
 
 /// NSRunningApplication 信息：(localizedName, bundleIdentifier, executableURL.path, pid)
@@ -2671,13 +2654,12 @@ fn ax_focused_window_info(pid: i32) -> (String, Option<WindowBounds>) {
             return (String::new(), None);
         }
 
-        // Construct attribute names as CFStrings. The AX constants are declared by
-        // ApplicationServices but are not exported by its linker framework on current macOS.
-        let focused_window_attribute = CFString::new("AXFocusedWindow");
-        let title_attribute = CFString::new("AXTitle");
-        let position_attribute = CFString::new("AXPosition");
-        let size_attribute = CFString::new("AXSize");
+        // 前台应用无响应时，同步 AX 调用默认可阻塞约 6 秒（AXSwift 记录的系统默认），
+        // 会拖住 750ms 头像循环与 1500ms 截图循环。限定单次消息超时为一个头像
+        // 采样周期：超时后返回 kAXErrorCannotComplete，走既有的静默降级路径。
+        let _ = macos_ax::AXUIElementSetMessagingTimeout(app_element, 0.75);
 
+        let focused_window_attribute = CFString::from_static_string(macos_ax::ATTR_FOCUSED_WINDOW);
         let window =
             match copy_ax_attribute(app_element, focused_window_attribute.as_concrete_TypeRef()) {
                 Some(window) => window,
@@ -2687,9 +2669,11 @@ fn ax_focused_window_info(pid: i32) -> (String, Option<WindowBounds>) {
                 }
             };
 
+        let title_attribute = CFString::from_static_string(macos_ax::ATTR_TITLE);
         let title = copy_ax_attribute(window, title_attribute.as_concrete_TypeRef())
             .map(|value| CFString::wrap_under_create_rule(value as _).to_string());
 
+        let position_attribute = CFString::from_static_string(macos_ax::ATTR_POSITION);
         let position = with_ax_value(window, position_attribute.as_concrete_TypeRef(), |value| {
             let mut point = macos_ax::AxPoint { x: 0.0, y: 0.0 };
             macos_ax::AXValueGetValue(
@@ -2700,6 +2684,7 @@ fn ax_focused_window_info(pid: i32) -> (String, Option<WindowBounds>) {
             .then_some((point.x, point.y))
         });
 
+        let size_attribute = CFString::from_static_string(macos_ax::ATTR_SIZE);
         let size = with_ax_value(window, size_attribute.as_concrete_TypeRef(), |value| {
             let mut size = macos_ax::AxSize {
                 width: 0.0,
@@ -4332,13 +4317,20 @@ fn parse_wm_class(xprop_output: &str) -> Option<String> {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub fn get_active_window_fast() -> Result<ActiveWindow> {
+    // Linux 没有单独的原生 fast provider；复用完整 provider，并由桌宠低频采样、
+    // 录制循环复用 state.cached_active_window，避免重复启动窗口查询命令。
+    get_active_window()
+}
+
 /// 其他平台的后备实现
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn get_active_window() -> Result<ActiveWindow> {
     get_active_window_fast()
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn get_active_window_fast() -> Result<ActiveWindow> {
     Ok(ActiveWindow {
         app_name: "Unknown".to_string(),

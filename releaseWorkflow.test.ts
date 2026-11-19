@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 
 test('Release workflow 应在构建前执行类型检查、前端测试并使用 npm ci', () => {
   const source = readFileSync(new URL('./.github/workflows/release.yml', import.meta.url), 'utf8');
@@ -35,42 +34,23 @@ test('Release workflow 应在构建前执行类型检查、前端测试并使用
   assert.ok(rustIndex < buildIndex, 'Rust 测试必须先于构建执行');
 });
 
-test('Release workflow 应校验严格 SemVer、五处版本一致并只允许当前 main 发布', () => {
+test('Release workflow 应在预检与构建中使用同一版本校验脚本并只允许当前 main 发布', () => {
   const source = readFileSync(new URL('./.github/workflows/release.yml', import.meta.url), 'utf8');
-  const bashPattern = source.match(
-    /if \[\[ ! "\$GITHUB_REF_NAME" =~ (\^\S+\$) \]\]; then/,
-  )?.[1];
-
-  assert.match(source, /tags:\s*\n\s*-\s*'v\[0-9\]\+\.\[0-9\]\+\.\[0-9\]\+'/);
+  const command = 'node scripts/prepare-release-version.mjs "$GITHUB_REF_NAME"';
+  assert.equal(source.split(command).length - 1, 2, '预检和实际打包都必须应用完整 RC 版本');
+  assert.ok(source.indexOf(command) < source.indexOf('npm run test:frontend'));
+  const buildJob = source.slice(source.indexOf('  build-tauri:'));
+  assert.ok(buildJob.indexOf(command) < buildJob.indexOf('name: Run frontend type check'));
   assert.match(source, /name:\s*Validate release tag and version/);
-  assert.ok(bashPattern, '应能读取发布工作流中的 SemVer 校验表达式');
-  const strictSemver = new RegExp(bashPattern);
-  for (const valid of ['v0.0.0', 'v1.1.1', 'v12.34.56', 'v1.1.3-rc.1', 'v1.1.3-rc.10']) {
-    assert.match(valid, strictSemver);
-  }
-  for (const invalid of ['v01.2.3', 'v1.02.3', 'v1.2.03', 'v1.2', '1.2.3', 'v1.1.3-rc.01', 'v1.1.3-rc.', 'v1.1.3-beta.1', 'v1.1.3-rc.1.extra']) {
-    assert.doesNotMatch(invalid, strictSemver);
-  }
-  assert.match(source, /npm run test:frontend/);
   assert.match(source, /git fetch origin main/);
   assert.match(source, /git rev-parse origin\/main/);
-  assert.match(source, /GITHUB_REF_NAME/);
 });
 
 test('RC releases use prerelease metadata and cannot replace the stable latest release', () => {
   const source = readFileSync(new URL('./.github/workflows/release.yml', import.meta.url), 'utf8');
-  const pattern = source.match(/if \[\[ ! "\$GITHUB_REF_NAME" =~ (\^\S+\$) \]\]; then/)?.[1];
-  assert.ok(pattern);
   assert.ok(source.includes("- 'v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+'"));
   assert.ok(source.includes("prerelease: ${{ contains(github.ref_name, '-rc.') }}"));
   assert.ok(source.includes("makeLatest: ${{ contains(github.ref_name, '-rc.') && 'false' || 'legacy' }}"));
-  for (const [tag, status] of [['v1.1.3', 0], ['v1.1.3-rc.1', 0], ['v1.1.3-rc.01', 1], ['v1.1.3-rc.1+meta', 1]] as const) {
-    const result: SpawnSyncReturns<string> = spawnSync('bash', ['-c', `[[ "$GITHUB_REF_NAME" =~ ${pattern} ]]`], {
-      env: { ...process.env, GITHUB_REF_NAME: tag },
-      encoding: 'utf8',
-    });
-    assert.equal(result.status, status, `${tag}: ${result.error ?? result.stderr}`);
-  }
   const config = JSON.parse(readFileSync(new URL('./src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
   for (const endpoint of config.plugins.updater.endpoints) {
     assert.ok(endpoint.includes('/releases/latest/download/'));
@@ -119,6 +99,8 @@ test('Security Audit 应允许 rustsec Action 更新检查与告警 Issue', () =
   assert.match(permissions, /^\s+issues: write$/m);
   assert.doesNotMatch(workflowPermissions, /^\s+(?:checks|issues): write$/m);
   assert.doesNotMatch(npmAuditJob, /^\s+(?:checks|issues): write$/m);
+  assert.match(source, /\n  pull_request:\s*\n  workflow_dispatch:/);
+  assert.doesNotMatch(source, /^\s+paths:/m);
 });
 
 test('Release workflow 缺少便携包、构建产物或附件时必须失败', () => {
@@ -134,6 +116,21 @@ test('Release workflow 缺少便携包、构建产物或附件时必须失败', 
   assert.doesNotMatch(source, /all-artifacts\/\*_portable_\*\.zip/);
   assert.match(source, /if-no-files-found:\s*error/);
   assert.match(source, /artifactErrorsFailBuild:\s*true/);
+});
+
+test('Windows 便携包应在独立暂存目录打包空Data并校验ZIP内容', () => {
+  const workflow = readFileSync(new URL('./.github/workflows/release.yml', import.meta.url), 'utf8');
+  const portableStep = workflow.match(/- name: Package Windows portable[\s\S]*?(?=\n\s+- name:)/)?.[0] ?? '';
+  assert.match(portableStep, /shell:\s*pwsh/);
+  assert.match(portableStep, /\.\/scripts\/package-windows-portable\.ps1 -Executable \$exe\.FullName/);
+  const script = readFileSync(new URL('./scripts/package-windows-portable.ps1', import.meta.url), 'utf8');
+  assert.match(script, /CreateDirectory\(\(Join-Path \$staging 'Data'\)\)/);
+  assert.match(script, /Copy-Item -LiteralPath \$exe\.FullName/);
+  assert.match(script, /CreateFromDirectory\(\$staging, \$temporaryArchive\)/);
+  assert.match(script, /'Data\/', 'PORTABLE_README\.txt', 'Work_Review\.exe'/);
+  assert.match(script, /Compare-Object \$expected \$entries/);
+  assert.doesNotMatch(script, /Copy-Item[^\n]*-Recurse/);
+  assert.ok(script.indexOf('Move-Item -LiteralPath $temporaryArchive') > script.indexOf('Compare-Object $expected $entries'));
 });
 
 test('macOS release 应保持 ad-hoc 签名且不导入自签证书', () => {

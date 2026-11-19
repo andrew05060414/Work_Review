@@ -7,62 +7,155 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.3-rc.4] - 2026-09-22
+## [1.1.4-rc.2] - 2026-11-11
 
-This is a release candidate for testing, not a stable release. Back up your data before installing. RC releases are not marked as Latest and are not offered through the stable automatic-update endpoint.
+1.1.4 的第二个候选版本，汇总 rc.1 后的 Windows 便携模式、桌宠透明恢复与数据迁移保护。仅供测试，不替换正式版 `1.1.3` 的 Latest，不改写已发布的 `v1.1.4-rc.1`。安装／迁移前请先完整备份数据。
 
-### Fixed
-- Avoid opening or focusing a Windows Terminal window during background OCR and monitoring subprocesses. Windows PowerShell now runs non-interactively without `-WindowStyle`; background commands disconnect stdin, and the PaddleOCR Python worker uses `CREATE_NO_WINDOW` while retaining its protocol pipes.
-- Backfill canonical website categories for existing activity data and route assistant requests using explicit data intent.
-- Collect the active macOS application through `NSWorkspace` and `AXUIElement` instead of spawning `osascript` for each capture; construct Accessibility attribute names as Core Foundation strings so both macOS architectures link correctly.
+### 新增
+- **Windows 便携数据目录**（#182）：便携 ZIP 自带空 `Data` 目录，EXE 同级存在该目录时，数据库、配置、截图和更新设置优先存放其中，不读取或改写本机目录偏好，也不自动导入旧数据；没有标记时保留原有行为。目录不可读写时明确失败，不静默回退，不新增设置页面。
+- **便携版更新保护**：仍可检查正式版和测试版，但只打开对应发布页手动下载 ZIP，后端拒绝运行安装版更新器。退出后替换 EXE、保留原 `Data`；便携模式禁止迁移到外部目录，避免重启后切回另一份数据。打包时仅携带程序、说明和空 `Data`，不会夹带已有用户数据。
 
-### Validation Still Required
-- Build and inspect Windows, macOS, and Linux release packages through the release workflow.
-- Verify background Windows OCR and browser URL capture do not display or focus a console window; exercise PaddleOCR worker startup.
-- Validate macOS active-window collection, website-category backfill, and assistant data-intent routing with representative existing data and live app usage.
-- Complete installer launch and upgrade checks before promoting this candidate to a stable release.
+### 修复
+- **Windows 桌宠亮屏黑块**（#190）：亮屏／恢复及重新开启桌宠时，在 GUI 线程恢复已有窗口的原生透明合成。合并相邻通知，再次熄屏或桌宠已隐藏时跳过；不重建 WebView、不改变气泡样式、位置、尺寸或鼠标穿透，恢复动作不抢焦点，也不增加常驻轮询。针对已复现的原生透明状态丢失机制完成修复；真实熄屏及报告者设备验收仍需独立确认。
+- **目录迁移回滚备份**：回滚受阻时保留未恢复的目标旧数据，并报告备份路径；只有确认完整恢复后才删除空备份目录，防止极端失败分支递归删除唯一备份。
+- **发布前安全依赖升级**：统一使用 `rusqlite 0.41.1` / `libsqlite3-sys 0.39.1`，内置 SQLite 升至 `3.54.1`，修复打开恶意数据库／WAL 文件组合时可能泄露未初始化内存的问题（RUSTSEC-2026-0459）。OpenSSL Rust 绑定更新至 `0.10.80`，修复 OCSP URL 非法 UTF-8 及 AES key-wrap 缓冲区大小校验问题（RUSTSEC-2026-0474／0476／0477）。不修改应用数据库结构；补充旧版 SQLite 合成数据库、已提交 WAL、旧表迁移、统计、备份和重新打开回归，保留查询上限溢出时的错误行为。
 
-## [1.1.3-rc.3] - 2026-09-22
+### 更新与便携使用
+- 已安装 rc.1 的用户可在关于页启用 **“接收测试版”**，使用原有检查按钮接收 rc.2；测试更新仍需确认，Windows 安装版和 macOS 保留签名及官方 SHA-256 校验。Linux 和便携模式走对应发布页手动更新。
+- 正式版 `1.1.3` 用户若要试用，需要首次手动下载安装；不选择测试版的用户不会自动升级到此 RC。
+- 首次切换便携模式不会自动搬运历史。请先完整退出旧程序、备份原数据目录，再将所需的完整数据副本放入 `Data`。移动时携带 EXE 和整个 `Data`；更新时不要用空目录覆盖已有 `Data`。
+- WebView2 缓存、自启动注册和用户选择的外部导出路径仍由系统管理，不承诺零系统痕迹。`Data` 可能含 API Key，请勿公开分享。
 
-This is a release candidate for testing, not a stable release. Back up your data before installing. RC releases are not marked as Latest and are not offered through the stable automatic-update endpoint.
+### 验证与已知边界
+- 本地前端 775 项、Rust workspace 765 项测试通过，Windows 原生电源通知注册／注销单独通过；Windows 调试构建与 macOS ARM 交叉类型检查通过，后者不代表真实链接或打包。
+- 原生故障注入直接编译生产恢复模块，24 步通过，覆盖“黑底→恢复透明”、100 次通知合并为 1 次、隐藏／再次熄屏保护，以及焦点、窗口边界和穿透保持。**这不是实际熄屏复现**，不能据此认定报告者具体驱动的触发原因，见 [桌宠透明恢复验收](docs/testing/windows-avatar-transparency.md)。
+- #189 的活动计时保护继续保留，真实 S0/S3 待机验收仍待反馈；已有错误历史不会自动重算。#177 的卡死后渲染异常不能视为一并解决。
+- 便携目录移动／数据读取和包内容已有自动验证；跨电脑实际启动、安装升级、长时间运行和多平台桌面验收仍未完整覆盖。
+- macOS 仍为 ad-hoc 签名，可能需要重新授权；仍有上游未维护／unsound 及撤回版本告警和既有平台限制，不能把安全门禁通过视为所有依赖告警已清零。元数据自动清理继续默认关闭，`0` 天表示永久保留。
 
-### Fixed
-- Avoid opening or focusing a Windows Terminal window during background OCR and monitoring subprocesses. Windows PowerShell now runs non-interactively without `-WindowStyle`; background commands disconnect stdin, and the PaddleOCR Python worker uses `CREATE_NO_WINDOW` while retaining its protocol pipes.
-- Backfill canonical website categories for existing activity data and route assistant requests using explicit data intent.
-- Collect the active macOS application through `NSWorkspace` and `AXUIElement` instead of spawning `osascript` for each capture.
+## [1.1.4-rc.1] - 2026-11-03
 
-### Validation Still Required
-- Build and inspect Windows, macOS, and Linux release packages through the release workflow.
-- Verify background Windows OCR and browser URL capture do not display or focus a console window; exercise PaddleOCR worker startup.
-- Validate macOS active-window collection, website-category backfill, and assistant data-intent routing with representative existing data and live app usage.
-- Complete installer launch and upgrade checks before promoting this candidate to a stable release.
+1.1.4 的第一个候选版本，仅供测试，不替换正式版 `1.1.3` 的 Latest，也不进入默认的正式版自动更新通道。首次试用请从本发布页手动下载安装；安装后可在关于页主动开启“接收测试版”，接收后续更新的候选版本。安装前请备份数据，建议用可弃数据验证升级及清理边界。
+
+### 修复
+- **测试版更新选择与确认**：关于页增加默认关闭的“接收测试版”紧凑选项，仍共用一个检查按钮；手动更新先确认目标版本，测试版明确提示风险与备份。完整比较 RC 序号与正式版本，禁止降级；检查和安装均校验本机渠道，代理下载固定到已确认版本。RC 打包时同步完整内部版本号，避免后续 RC 或同版本正式版无法识别。
+- **更新包版本完整性**：保留 Tauri 更新签名验证，并在执行安装器之前额外核对 GitHub 官方 HTTPS API 提供的目标资产 SHA-256。代理回放旧的有效签名包、摘要缺失或不匹配时拒绝安装；不会信任代理自报的摘要。
+- **关于页更新入口**：移除独立三列更新面板、重复版本号、渠道标签及说明展开区，恢复为自动检查选项和一个手动检查按钮；保留检查进度、结果提示及现有更新安全校验。
+- **Windows 待机时长**（#189）：监听睡眠/恢复与当前会话显示状态，熄屏或恢复时切开活动段；以独立采样心跳和双时钟检查兜底，仅结算中断前已观察的正常尾段，不再把未知空档回补给最后一个应用。新建、合并、关闭截图及浮窗路径统一遵守边界，跨待机的截图结果丢弃。历史数据不自动修改；S0/S3 实机验收步骤见 [Windows 待机回归](docs/testing/windows-standby.md)。
+- **日报编辑字体**（#188）：默认继承界面字体，避免中文被强制等宽字体回退成宋体；“设置 → 外观”新增日报编辑字体选择，支持微软雅黑、苹方、Noto Sans CJK SC、Arial 和等宽字体，保存后生效。未安装字体回退到界面字体，旧配置无需迁移。
+- **GNOME Wayland 空闲检测**（#187）：优先读取 Mutter IdleMonitor 的真实空闲时间，保留其他桌面的回退，避免离开电脑后继续计时。
+- **活动 API 与隐私**：活动列表和单条查询统一遵守隐私规则，非法日期不再扩大为全库查询；本地 API 增加请求读取超时和并发连接上限。
+- **数据可靠性**：切换数据目录先构建临时副本并保留目标旧数据的恢复路径；数据库迁移不再吞掉真实错误，应用切换回补失败不再伪装成功；编辑昨日回退日报时写入实际报告日期及对应缓存。
+- **截图与存储**：截图从全局状态锁移出，外部截图命令有界等待；删除到期或超限的本地截图时同步清空数据库旧路径，保留已有远程 URL。远程 S3 与 WebDAV 统一禁止公网明文 HTTP，保留本机与内网 HTTP 支持。
+- **Linux 后台开销**：空闲检测共享短时缓存并设置命令超时，降低锁屏检测和桌宠窗口采样频率，合并重复进程查询；桌宠关闭时减少输入桥接与重试线程的无用唤醒。
+- **查询与界面反馈**：浏览器合并查询增加规范化 URL 表达式索引，AI 域名分类一轮复用历史读取；删除重复时间线预加载。时间线分页、概览分类和日报周条失败不再静默伪装成空数据，窄窗口导航补可访问名称及当前页语义。
+- **门禁与文档**：每个 PR 和 `main` push 执行依赖安全审计；更新 TLS 信任依赖，修正 Windows 构建产物路径，发布前统一校验五处版本源和完整候选版本号。
+
+### 安全默认与验证边界
+- **历史记录不自动修正**：本版防止新的待机误计，但不会推测并删除已经写入的长活动；#189 中异常应用名称仍需原始记录核查，不能视为一并解决。
+- **实机验收仍待补齐**：自动回归、本地构建和原生通知注册检查不等同于真实 S0/S3 待机、安装升级或多平台长时间桌面验收；详见待机测试文档。部分平台的全局输入 Hook 仍采用关闭后忽略事件，而不是全部物理注销。
+- **在线更新安全失败**：GitHub 官方资产摘要缺失、API 不可达或限流时，不会仅凭代理清单继续安装；可稍后重试或从发布页手动下载。Linux 当前仍走对应发布页的手动安装。
+- **现有平台限制保留**：macOS 仍为 ad-hoc 签名，更新后可能需要重新授予权限；#177 的卡死恢复后桌宠渲染异常尚未确认解决。元数据自动清理仍默认关闭，`0` 天仍为永久保留，WebDAV 同步不覆盖本机清理授权。
+
+## [1.1.3] - 2026-10-20
+
+正式发布，汇总 1.1.3 候选版本的修复；业务代码与 rc.3 保持一致，仅同步正式版本号与发布说明。现有 rc.3 发行版和标签保留。升级前请备份数据，尤其是在迁移目录或启用历史清理前。
+
+### 修复
+- **隐私过滤一致性**：localhost API/MCP 实时上下文遵守应用忽略、脱敏及域名排除规则，普通窗口标题也过滤敏感文本；隐私关键词自动保存时不再丢失未完成的配置改动。
+- **域名排除规则**：解析实际 URL 主机，覆盖非默认端口、子域、大小写与末尾点；采集与查询使用相同匹配语义，避免被排除的网站继续记录。
+- **停止生成与响应超时**：取消日报时同步终止后台分析并复位桌宠；助手收束阶段响应停止，响应体、重试与流式回退共用绝对截止时间。
+- **助手切页与历史保存**：后台回答完成后保存最新终态消息，避免空白或部分历史；切回页面后仍可停止在途请求。
+- **助手问题路由**：时间分布等数据问题正确进入工作复盘；“如何写日报”等概念和写作问题保持普通聊天，减少错误的权限拒绝与数据引导。
+- **Windows OCR**（#175）：隐藏 PowerShell 窗口，每周期只执行一次整图识别；新建与合并活动统一按 `screenshot_interval` 限频，快速切换应用、标题或 URL 不再绕过冷却。切换截图仍保留，冷却期内不额外 OCR 或排队补识别；超长输入按原生引擎上限截断并映射回原图。
+- **macOS 前台窗口与浮窗**（#181）：用进程内 NSWorkspace/AXUIElement 读取替代轮询启动 `osascript`，限制单次 AX 消息等待；浮窗按连续观察的实际间隔计时，保留不足一秒余量，避免暂停、锁屏及同应用多浮窗重复累计。
+- **macOS 打包与 SDK**：AX 常量采用现代 SDK 兼容构造，移除固定 CommandLineTools `SDKROOT`，让 SDK 跟随所选 Xcode/xcrun，修复 Apple Silicon/Intel 打包链接错误；证书辅助脚本兼容 OpenSSL 3。
+- **分类编辑**（#178）：网站分类修改即时反映到概览及历史，回补从标题/OCR 识别的域名；无匹配记录时如实提示，自定义分类无需先应用即可重命名或删除。
+- **目录迁移与语义索引**：迁移前校验规范化路径，拒绝别名或符号链接指向的危险目标；语义索引前保存 AI 设置，改善嵌入配置错误提示。
+- **界面与桌宠边界**：恢复玻璃风格下的时间线、分类及日报浮层定位，修正紧凑 KPI 字号（#172）；桌宠定位使用目标屏幕物理像素和展开状态，小尺寸气泡受可用宽度约束。
+- **Claude Sonnet 5.5**：支持自适应思考，保留签名内容块及工具往返顺序，分开累积流式思考和正文并处理空正文。
+- **依赖安全更新**：rustls `0.23` 系列升级至 `0.23.46`，DOMPurify 升级至 `3.4.17`，纳入上游安全修复，保留现有 HTML 净化流程；Windows 更新使用签名的 NSIS 安装包并关闭未使用的 ZIP 解压功能，避免引入已公告的 ZIP 解压漏洞。
+
+### 变更与安全默认
+- **活动元数据保留策略**：仅在本机明确确认启用后，于启动及每 6 小时清理到期元数据并失效关联摘要与语义索引；没有过期记录时不清空既有语义索引。
+- **自动清理默认关闭**：在“设置 → 存储”确认启用，`0` 天表示永久保留；截图和元数据期限独立，升级不会按旧默认值删除历史，WebDAV 同步不覆盖本机清理授权和期限。
+- **默认 AI 模型更新**：刷新各供应商默认模型，端点和默认模型统一由 `AiProvider` 提供。
+- **发布门禁**：版本与当前 `origin/main` 一致，重新构建 Windows、macOS 双架构、Linux 双架构；检查签名、更新元数据、必需附件及 Linux GLIBC 兼容性。
+
+### 已知限制与验证边界
+- macOS 仍使用临时签名，更新后可能需要重新授予屏幕录制、辅助功能等权限（#143）；本次没有引入 Developer ID 签名或苹果公证。
+- #177 的卡死恢复后桌宠渲染异常缺少复现信息，本版边界修复不代表该问题已确认解决。
+- 自动测试与构建不等同于实机验收；Windows OCR 长时间运行、安装升级、真实桌面隐私与清理边界，以及 macOS/Linux 真机交互仍缺少完整验证记录。
+
+## [1.1.3-rc.3] - 2026-10-16
+
+首次打包的 macOS SDK 与链接器不匹配问题已修复，保留全部功能修复，按原计划重新构建 rc.3。
+
+1.1.3 的第三个候选版本，仅用于测试，不替换稳定版 Latest，也不进入稳定自动更新通道。请先备份数据，建议使用可弃数据验证清理策略及升级行为。
+
+### 修复
+- **macOS 打包 SDK 选择**：移除固定 CommandLineTools `SDKROOT` 的配置，SDK 跟随当前所选 Xcode/xcrun，避免 Apple Silicon 与 Intel 构建出现 `libSystem.B.tbd: unknown architecture`；保留显式系统编译器路径并增加回归检查。
+- **实时上下文隐私边界**：localhost API 与 MCP 实时上下文遵守应用忽略、内容脱敏和域名排除规则，正常标题也过滤敏感文本。
+- **域名黑名单匹配**：使用 URL 主机解析，修复非默认端口、子域、大小写与末尾点导致的排除规则漏匹配，采集与查询使用相同语义。
+- **日报取消与状态收尾**：停止助手中的日报操作时同时终止已启动的后台分析任务，清理生成状态；取消也及时发布桌宠复位状态，避免残留模型调用及卡在“生成中”。
+- **助手收束与响应体超时**：最后收束阶段响应停止信号；完整请求（含响应体、重试和流式回退）共用绝对截止时间，不再只限制等待响应头。
+- **切页后的助手历史**：后台回答完成后从最新 store 读取终态保存，避免历史会话为空或只有部分内容；切回助手页后仍可停止在途请求。
+- **元数据清理与索引**：显式开启后，启动及每 6 小时清理到期的活动元数据并失效关联摘要、语义索引；没有过期活动时不再清空已有语义索引。
+- **macOS 浮窗计时**：按连续观察的实际间隔累计并保留不足一秒的余量；避免跨会话合并、暂停或锁屏期间累计及同一应用多浮窗重复计时。
+- **Claude Sonnet 5.5 兼容**：使用自适应思考，保留带签名的原始内容块和工具往返顺序；分别累积流式思考与正文，补齐空正文兜底。
+- **助手普通写作问题路由**：“如何写日报”等概念、写作问题保持普通聊天，不擅自进入工作复盘或附加本机记录引导。
+- **macOS AX 读取有界化**：限制单次辅助功能消息等待，降低前台应用无响应时拖住桌宠与采集循环的风险。
+- **TLS 依赖安全更新**：锁定的 rustls `0.23` 系列升级至 `0.23.46`，纳入近期上游安全修复。
+- **前端 HTML 净化安全补丁**：DOMPurify 从 `3.4.12` 升级至 `3.4.17`，修复已披露的 `IN_PLACE` 模式 XSS 公告；助手与日报仍使用现有净化流程。
+- **OCR 全局限频**（#175）：新建与合并活动统一遵循 `screenshot_interval`，快速切换应用、窗口标题或浏览器 URL 不再绕过 OCR 冷却。切换截图仍保存，冷却期内的活动不额外启动 OCR，也不排队补识别；Windows 隐藏 PowerShell 窗口及单次整图识别措施保留。
+- **桌宠高 DPI 定位**：默认定位与展开后的边界校正统一使用目标显示器的物理像素尺寸，避免高缩放、多屏下窗口仍超出工作区；同步配置时按当前展开状态计算边界。
+- **桌宠小尺寸气泡**：气泡最小宽度也受窗口可用宽度约束，避免桌宠缩小后因固定最小宽度而横向裁剪。上述桌宠修复不代表已确认解决 #177 的卡死恢复后渲染异常。
+
+### 安全默认与测试边界
+- **元数据自动清理默认关闭**：必须在“设置 → 存储”确认启用，`0` 天表示永久保留；截图和元数据保留期限独立。升级不会按旧默认值直接删除历史；WebDAV 配置同步不覆盖本机的元数据清理授权与期限。
+- **自动回归**：本地 Windows 已通过 754 项前端和 718 项 Rust 测试、类型检查、生产构建、格式与 Clippy 零警告检查；发布仍须通过五平台构建及产物完整性门禁。
+- **仍需测试**：真实桌面上的隐私过滤、生成中停止、切页后历史恢复、清理边界与安装升级；macOS/Linux 真机交互尚未验证，RC 不代表稳定版认证。
+
+## [1.1.3-rc.2] - 2026-09-30
+
+1.1.3 的第二个候选版本，不进入稳定自动更新通道；测试数据目录迁移前请先备份数据。
+
+### 修复
+- **macOS 前台窗口采集重写**（#181）：改为进程内 NSWorkspace/AXUIElement 直接读取，不再每次轮询拉起 `osascript` 子进程，消除 Dock 图标的周期性闪烁。
+- **网站分类立即生效**（#178）：分类修改立即反映到概览与历史，域名来自窗口标题或 OCR 的站点会被回补并重新分类；无历史记录匹配时给出真实提示，不再误报成功。
+- **助手数据意图路由**（#179）：「本周时间分布」这类裸数据问题正确进入工作复盘模式；通用对话显式附带本地数据说明，模型不再虚构权限拒绝。
+- **macOS 26 SDK 链接修复**（#184）：AX 属性常量在现代 SDK 中是宏而非导出符号，改用 `CFString::from_static_string` 等价构造，修复 arm64 链接错误。
+- **codesign 脚本兼容 OpenSSL 3**（#185）：优先系统 LibreSSL 输出传统 PKCS#12，缺失时回退 `-legacy`，修复 `security import` 报 MAC verification failed。
+
+### 变更
+- **默认 AI 模型刷新**：OpenAI `gpt-6-luna`、Gemini `gemini-3.8-flash`、Claude `claude-sonnet-5-5`、智谱 `glm-5.3-flash`、Kimi `kimi-k2.6`、豆包 `doubao-seed-evolving`、MiniMax `MiniMax-M3`、Groq `openai/gpt-oss-120b`、xAI `grok-4.7`；供应商端点与默认模型统一由 `AiProvider` 提供，不再维护重复清单。
 
 ## [1.1.3-rc.1] - 2026-09-05
 
-This is a release candidate for testing, not a stable release. Back up your data before installing, especially before testing data-directory migration. RC releases are not marked as Latest and are not offered through the stable automatic-update endpoint.
+1.1.3 的第一个候选版本，仅用于测试，不是稳定版。安装前请备份数据，尤其是测试数据目录迁移前。RC 版本不会标记为 Latest，也不通过稳定自动更新通道提供。
 
-### Fixed
-- Restore viewport positioning for overlays affected by the glass-style window shell, including timeline drawers, category controls, and report dialogs.
-- Keep compact overview KPI subtitles at their intended size (#172).
-- Resize oversized Windows OCR inputs to the native engine limit within the existing process and map text boxes back to the original image.
-- Allow the first OCR pass for a new activity even while the repeated-capture cooldown is active. Existing OCR concurrency limits still apply.
-- Preserve unsaved configuration changes made while privacy keyword autosaves are in flight.
-- Validate canonical data-directory paths before migration cleanup or copying, rejecting parent/child targets reached through aliases or symbolic links.
-- Allow every custom category to be renamed or deleted without first applying it to an application or rewriting activity history.
-- Save AI settings before semantic indexing and clarify embedding configuration errors.
-- Remove an unnecessary owned-string allocation when normalizing Windows window titles, resolving the Windows-only `clippy::unnecessary_to_owned` build failure without weakening lint checks.
+### 修复
+- 恢复受玻璃风格窗口外壳影响的浮层视口定位，包括时间线抽屉、分类控件和日报对话框。
+- 紧凑概览 KPI 副标题保持应有字号（#172）。
+- Windows OCR 超长输入在现有进程内按原生引擎上限截断，并把文本框映射回原图。
+- 新活动的首次 OCR 不再被重复截图冷却期挡住；既有 OCR 并发限制仍然生效。
+- 隐私关键词自动保存进行中时，未保存的配置改动不再丢失。
+- 迁移清理或复制前校验规范化数据目录路径，拒绝经别名或符号链接达成的父子目录目标。
+- 自定义分类无需先应用到某个应用或改写活动历史，即可重命名或删除。
+- 语义索引前先保存 AI 设置，并改进嵌入配置的错误提示。
+- 移除 Windows 窗口标题规范化中多余的所有权字符串分配，在不放宽 lint 检查的前提下解决 Windows 专属的 `clippy::unnecessary_to_owned` 构建失败。
 
-### Changed
-- Simplify screenshot-focused timeline details and inline category selection. Applying a category uses a second-click confirmation; deletion and privacy-rule changes retain confirmation dialogs.
-- Normalize Windows application titles and reduce native OCR process overhead.
-- Close the five assessed RustSec unsoundness tracking issues (#167-#171); this does not claim that upstream advisories are fixed. Security and unsoundness advisories remain tracked.
-- Accept strict `vMAJOR.MINOR.PATCH-rc.N` release tags and publish them as GitHub prereleases without replacing the stable Latest release.
+### 变更
+- 简化截图时间线详情与行内分类选择：应用分类改为二次点击确认；删除与隐私规则修改保留确认对话框。
+- 规范化 Windows 应用标题，降低原生 OCR 进程开销。
+- 关闭已评估的五条 RustSec unsoundness 跟踪 issue（#167-#171）；这不代表上游公告已修复，安全与 unsoundness 公告继续跟踪。
+- 接受严格的 `vMAJOR.MINOR.PATCH-rc.N` 发布 tag，作为 GitHub 预发布，不替换稳定的 Latest 版本。
 
-### Validation Still Required
-- Windows native OCR on ordinary, 4K, and multi-monitor captures, including hidden PowerShell execution.
-- Fast application switching, privacy-save persistence after restart, and category-management interactions.
-- Migration with disposable data, including dangerous target rejection and interruption recovery.
-- Native installer builds, launch checks, and upgrade testing from 1.1.2 on supported platforms.
+### 待验证
+- Windows 原生 OCR 在普通屏、4K 与多显示器下的截图，包括隐藏 PowerShell 执行。
+- 快速切换应用、重启后隐私保存持久性、分类管理交互。
+- 用可弃数据做迁移，包括危险目标拒绝与中断恢复。
+- 原生安装包构建、启动检查与从 1.1.2 的升级测试。
 
 ## [1.1.2] - 2026-08-22
 

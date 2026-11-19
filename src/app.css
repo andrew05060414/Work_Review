@@ -13,7 +13,8 @@
    ══════════════════════════════════════════════════════════ */
 :root {
   color-scheme: light;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Segoe UI Variable Text", "Microsoft YaHei", sans-serif;
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Segoe UI Variable Text", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-ui);
   font-size: 16px;
   line-height: 1.6;
   font-weight: 400;
@@ -2585,6 +2586,12 @@
   background: transparent;
   border: 1.5px solid #cbd5e1;
 }
+.report-weekstrip-day-error {
+  color: #b45309;
+}
+.report-weekstrip-day-error i {
+  background: #f59e0b;
+}
 .report-weekstrip-day-active,
 .report-weekstrip-day-active:hover:not(:disabled) {
   background: #3b82f6;
@@ -2624,6 +2631,9 @@
 }
 .dark .report-weekstrip-day-none i {
   border-color: #484f58;
+}
+.dark .report-weekstrip-day-error {
+  color: #fbbf24;
 }
 .dark .report-weekstrip-day-active,
 .dark .report-weekstrip-day-active:hover:not(:disabled) {
@@ -3004,7 +3014,7 @@
   width: 100%;
   min-height: 480px;
   padding: 0.75rem 1rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: inherit;
   font-size: 15px;
   line-height: 1.8;
   resize: vertical;
@@ -4225,16 +4235,42 @@
   color: #334155;
 }
 
-.about-update-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.75rem;
-  width: 100%;
+.about-update-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem 1.25rem;
+  margin-top: 1.25rem;
 }
 
-.about-update-unit {
-  min-width: 0;
-  text-align: center;
+.about-auto-check {
+  display: inline-flex;
+  min-height: 2.25rem;
+  align-items: center;
+  gap: 0.5rem;
+  color: #64748b;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.about-auto-check input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: #6366f1;
+}
+
+.about-auto-check input:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 3px;
+}
+
+.about-update-feedback {
+  margin: 0.6rem 0 0;
+  color: #64748b;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
 }
 
 .about-principles-card {
@@ -4342,6 +4378,11 @@
 
 .dark .about-brand-description,
 .dark .about-tech-item {
+  color: #8b949e;
+}
+
+.dark .about-auto-check,
+.dark .about-update-feedback {
   color: #8b949e;
 }
 
@@ -4515,16 +4556,8 @@
   box-shadow: 0 14px 30px rgba(0, 0, 0, 0.22);
 }
 
-.dark .about-update-feedback {
-  border-color: rgba(48, 54, 61, 0.8);
-}
-
 .dark .about-principles-title {
   color: #adbac7;
-}
-
-.dark .about-update-feedback {
-  color: #7d8590;
 }
 
 .dark .about-principles-card {
@@ -4850,15 +4883,6 @@
 @media (max-width: 640px) {
   .about-brand-card {
     padding: 1.5rem 1rem;
-  }
-
-  .about-update-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .about-update-unit {
-    min-height: 4.2rem;
-    padding: 0.75rem 0;
   }
 
   .about-tech-stack {

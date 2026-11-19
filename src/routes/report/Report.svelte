@@ -12,6 +12,7 @@
   import { cache, type CacheState } from '../../lib/stores/cache.ts';
   import { formatLocalizedDate, formatLocalizedTime, formatDurationLocalized, locale, t, tm, translateCategoryLabel } from '$lib/i18n/index.ts';
   import { formatUserError } from '$lib/utils/errorDisplay.ts';
+  import { reportEditorFontFamily } from '$lib/utils/reportEditorFont.ts';
   import { shouldShowPromptAppliedToast } from './reportPromptFeedback.ts';
   import { resolveReportMeta, type ResolvedReportMeta } from './reportMeta.ts';
   import {
@@ -49,6 +50,7 @@
     daily_report_pinned_blocks: string[];
     daily_report_hidden_blocks: string[];
     daily_report_system_prompt_override?: string | null;
+    report_editor_font?: string;
     [key: string]: unknown;
   }
 
@@ -627,11 +629,13 @@
     }
 
     const fullContent = newSections.map(reportSectionMarkdownForStorage).join('\n');
+    const reportDate = report.date;
+    const reportCacheKey = `${reportDate}:${currentLocale}`;
 
     try {
-      await invoke('update_report_content', { date: selectedDate, locale: currentLocale, content: fullContent });
+      await invoke('update_report_content', { date: reportDate, locale: currentLocale, content: fullContent });
       report = { ...report, content: fullContent };
-      cache.setReport(currentReportCacheKey, report);
+      cache.setReport(reportCacheKey, report);
       editingSection = -1;
       editingContent = '';
     } catch (e) {
@@ -764,7 +768,7 @@
   // ══════════ 历史周条：哪天有报告一眼可见（本周 7 天,点击切换日期,弱化为工具栏下细行） ══════════
   // 带首句摘要的历史列表需 `list_report_dates` 汇总接口,留待后端批次;
   // 这里用既有 get_saved_report 逐日探测"有/无",每个 locale 只探测一次。
-  let weekReportStatus: Record<string, boolean> = {}; // date -> bool
+  let weekReportStatus: Record<string, boolean | null> = {}; // date -> true/false/null(error)
   let weekStatusLocale = '';
   let weekStatusRequestId = 0;
 
@@ -792,7 +796,7 @@
           const saved = await invoke<DailyReport | null>('get_saved_report', { date, locale: currentLocale });
           return [date, Boolean(saved)] as const;
         } catch {
-          return [date, false] as const;
+          return [date, null] as const;
         }
       })
     );
@@ -812,7 +816,8 @@
         date,
         label: formatLocalizedDate(parsed, { weekday: 'narrow' }),
         dayNum: parsed.getDate(),
-        hasReport: !!weekReportStatus[date],
+        hasReport: weekReportStatus[date] === true,
+        isError: weekReportStatus[date] === null,
         isFuture: date > todayStr,
         isToday: date === todayStr,
       };
@@ -1135,9 +1140,9 @@
       {#each weekStripDays as day (day.date)}
         <button
           type="button"
-          class="report-weekstrip-day {day.hasReport ? '' : 'report-weekstrip-day-none'} {day.date === selectedDate ? 'report-weekstrip-day-active' : ''}"
+          class="report-weekstrip-day {day.isError ? 'report-weekstrip-day-error' : day.hasReport ? '' : 'report-weekstrip-day-none'} {day.date === selectedDate ? 'report-weekstrip-day-active' : ''}"
           disabled={day.isFuture}
-          title={day.isFuture ? '' : day.hasReport ? t('report.weekStripHasReport') : t('report.weekStripNoReport')}
+          title={day.isFuture ? '' : day.isError ? t('common.loadFailedRetry') : day.hasReport ? t('report.weekStripHasReport') : t('report.weekStripNoReport')}
           on:click={() => selectDate(day.date)}
         >
           <span class="report-weekstrip-day-label">{day.label} {day.dayNum}</span>
@@ -1588,6 +1593,8 @@
       <div class="modal-body">
         <textarea
           class="report-edit-textarea"
+          aria-label={t('report.editSection')}
+          style:font-family={reportEditorFontFamily(config?.report_editor_font)}
           bind:value={editingContent}
         ></textarea>
       </div>

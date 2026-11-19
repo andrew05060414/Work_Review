@@ -126,19 +126,19 @@ impl AiProvider {
     pub fn default_model(&self) -> &'static str {
         match self {
             AiProvider::Ollama => "qwen3",
-            AiProvider::OpenAI => "gpt-5.4",
-            AiProvider::Gemini => "gemini-3-flash",
-            AiProvider::Claude => "claude-sonnet-4-6",
+            AiProvider::OpenAI => "gpt-6-luna",
+            AiProvider::Gemini => "gemini-3.8-flash",
+            AiProvider::Claude => "claude-sonnet-5-5",
             AiProvider::SiliconFlow => "Qwen/Qwen3-8B",
             AiProvider::DeepSeek => "deepseek-chat",
             AiProvider::Qwen => "qwen-flash",
-            AiProvider::Zhipu => "glm-5-turbo",
-            AiProvider::Moonshot => "moonshot-v1-8k",
-            AiProvider::Doubao => "doubao-lite-4k",
-            AiProvider::MiniMax => "MiniMax-M2.5",
+            AiProvider::Zhipu => "glm-5.3-flash",
+            AiProvider::Moonshot => "kimi-k2.6",
+            AiProvider::Doubao => "doubao-seed-evolving",
+            AiProvider::MiniMax => "MiniMax-M3",
             AiProvider::OpenRouter => "openrouter/auto",
-            AiProvider::Groq => "llama-3.3-70b-versatile",
-            AiProvider::XAI => "grok-2-latest",
+            AiProvider::Groq => "openai/gpt-oss-120b",
+            AiProvider::XAI => "grok-4.7",
             AiProvider::Mistral => "mistral-small-latest",
             AiProvider::LmStudio => "local-model",
             AiProvider::Custom => "",
@@ -461,16 +461,30 @@ impl PrivacyConfig {
             .any(|k| title_lower.contains(&k.to_lowercase()))
     }
 
-    /// 从 URL 中提取域名
+    /// 从完整 URL 或裸域名（可带端口）提取小写主机名，保留 www 和子域。
+    /// 无法解析或没有主机时返回空字符串，供调用者跳过匹配或分类。
     pub fn extract_domain(url: &str) -> String {
-        let without_protocol = url
-            .trim_start_matches("https://")
-            .trim_start_matches("http://");
-        without_protocol
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .to_lowercase()
+        let url = url.trim();
+        let has_scheme = url
+            .split_once("://")
+            .is_some_and(|(scheme, _)| !scheme.contains(['/', '?', '#']));
+        let parsed = if has_scheme {
+            reqwest::Url::parse(url)
+        } else {
+            // 裸域名不接受相对路径或用户信息，避免被补全为另一个主机。
+            let authority = url.split(['/', '?', '#']).next().unwrap_or("");
+            if url.starts_with(['/', '\\']) || authority.contains('@') {
+                return String::new();
+            }
+            reqwest::Url::parse(&format!("https://{url}"))
+        };
+        parsed
+            .ok()
+            .and_then(|url| {
+                url.host_str()
+                    .map(|host| host.trim_end_matches('.').to_lowercase())
+            })
+            .unwrap_or_default()
     }
 
     /// 后缀匹配域名：domain == pattern 或 domain 以 .pattern 结尾
@@ -560,8 +574,11 @@ pub enum ScreenshotWidthMode {
 pub struct StorageConfig {
     /// 截图保留天数（超过后删除截图文件）
     pub screenshot_retention_days: u32,
-    /// 元数据保留天数（超过后删除数据库记录）
+    /// 元数据保留天数，0 表示永久保留；仅在显式开启自动清理后生效。
     pub metadata_retention_days: u32,
+    /// 旧版本未执行元数据清理，升级后默认关闭，避免按旧默认天数误删历史。
+    #[serde(default)]
+    pub metadata_cleanup_enabled: bool,
     /// 存储空间上限（MB），超过后自动清理最旧的数据
     pub storage_limit_mb: u32,
     /// JPEG 质量 (1-100)
@@ -587,10 +604,11 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             screenshot_retention_days: 7, // 默认保留7天截图
-            metadata_retention_days: 30,  // 默认保留30天元数据
-            storage_limit_mb: 2048,       // 默认2GB上限
-            jpeg_quality: 85,             // 85%质量，更清晰
-            max_image_width: 1280,        // 最大宽度1280px
+            metadata_retention_days: 30,  // 启用自动清理后的默认保留天数
+            metadata_cleanup_enabled: false,
+            storage_limit_mb: 2048, // 默认2GB上限
+            jpeg_quality: 85,       // 85%质量，更清晰
+            max_image_width: 1280,  // 最大宽度1280px
             screenshots_enabled: true,
             screenshot_display_mode: ScreenshotDisplayMode::ActiveWindow,
             screenshot_width_mode: ScreenshotWidthMode::Auto,
@@ -1077,6 +1095,9 @@ pub struct AppConfig {
     /// 界面风格: a=Quiet Pro, b=当前柔和层次, c=Compact Data
     #[serde(default = "default_ui_visual_style")]
     pub ui_visual_style: String,
+    /// 日报编辑字体；空字符串使用界面字体，未安装的字体由前端回退。
+    #[serde(default)]
+    pub report_editor_font: String,
     /// 上班开始时间（0-23）
     #[serde(default = "default_work_start")]
     pub work_start_hour: u8,
@@ -1351,6 +1372,7 @@ impl Default for AppConfig {
             last_app_version: None,
             theme: "system".to_string(),
             ui_visual_style: default_ui_visual_style(),
+            report_editor_font: String::new(),
             work_start_hour: 9,
             work_end_hour: 18,
             work_start_minute: 0,
@@ -1376,7 +1398,7 @@ impl Default for AppConfig {
             ollama_host: "http://localhost:11434".to_string(),
             ollama_model: "llava".to_string(),
             openai_api_key: None,
-            openai_model: "gpt-5.4".to_string(),
+            openai_model: "gpt-6-luna".to_string(),
             hide_dock_icon: false,
             lightweight_mode: false,
             break_reminder_enabled: false,
@@ -1431,6 +1453,10 @@ impl AppConfig {
         let telegram_bot_bind_code = self.telegram_bot_bind_code.clone();
         let telegram_bot_bind_code_expires_at = self.telegram_bot_bind_code_expires_at;
         let background_image = self.background_image.clone();
+        let metadata_retention = (
+            self.storage.metadata_cleanup_enabled,
+            self.storage.metadata_retention_days,
+        );
 
         *self = remote;
 
@@ -1448,6 +1474,11 @@ impl AppConfig {
         self.telegram_bot_bind_code = telegram_bot_bind_code;
         self.telegram_bot_bind_code_expires_at = telegram_bot_bind_code_expires_at;
         self.background_image = background_image;
+        // 自动删除授权与期限属于本机，远端同步不得开启或缩短本机保留策略。
+        (
+            self.storage.metadata_cleanup_enabled,
+            self.storage.metadata_retention_days,
+        ) = metadata_retention;
     }
 
     /// 规范化配置，兼容旧字段并补齐助手可用的文本模型档案
@@ -2148,11 +2179,79 @@ mod tests {
     use std::io::{self, Write};
     use std::path::PathBuf;
 
+    #[test]
+    fn privacy_extract_domain_normalizes_hosts() {
+        for (input, expected) in [
+            ("https://example.com/path", "example.com"),
+            ("https://example.com:8443/path", "example.com"),
+            (
+                " HTTPS://Sub.Example.COM:8443?query=1#fragment ",
+                "sub.example.com",
+            ),
+            ("example.com", "example.com"),
+            ("Example.COM:8443/path?query=1#fragment", "example.com"),
+            ("example.com?query=1", "example.com"),
+            ("example.com#fragment", "example.com"),
+            (
+                "example.com?next=https://other.com&email=a@b.com",
+                "example.com",
+            ),
+            ("https://WWW.Example.com:8443", "www.example.com"),
+            ("https://Sub.Example.com.:8443/path", "sub.example.com"),
+            ("http://localhost:5173/app", "localhost"),
+            ("127.0.0.1:8080", "127.0.0.1"),
+            ("https://[::1]:8443/path", "[::1]"),
+            ("", ""),
+            ("   ", ""),
+            ("not a host", ""),
+            ("https://", ""),
+            ("https://example.com:invalid/path", ""),
+            ("example.com:99999", ""),
+            ("/example.com/path", ""),
+            ("mailto:user@example.com", ""),
+            ("about:blank", ""),
+            ("file:///tmp/example.com", ""),
+        ] {
+            assert_eq!(
+                super::PrivacyConfig::extract_domain(input),
+                expected,
+                "{input:?}"
+            );
+        }
+    }
+
     fn unique_temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "work-review-config-{name}-{}",
             uuid::Uuid::new_v4()
         ))
+    }
+
+    #[test]
+    fn 元数据自动清理须兼容旧配置且不得经远端同步开启() {
+        let mut legacy = serde_json::to_value(AppConfig::default()).unwrap();
+        legacy["storage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("metadata_cleanup_enabled");
+        let mut local: AppConfig = serde_json::from_value(legacy).unwrap();
+        assert!(!local.storage.metadata_cleanup_enabled);
+        assert_eq!(local.storage.metadata_retention_days, 30);
+        let mut remote = AppConfig::default();
+        remote.storage.metadata_cleanup_enabled = true;
+        remote.storage.metadata_retention_days = 1;
+        local.apply_synced_remote(remote);
+        assert!(!local.storage.metadata_cleanup_enabled);
+        assert_eq!(local.storage.metadata_retention_days, 30);
+        local.storage.metadata_cleanup_enabled = true;
+        local.storage.metadata_retention_days = 90;
+        let restored: AppConfig =
+            serde_json::from_value(serde_json::to_value(&local).unwrap()).unwrap();
+        assert!(restored.storage.metadata_cleanup_enabled);
+        assert_eq!(restored.storage.metadata_retention_days, 90);
+        local.apply_synced_remote(AppConfig::default());
+        assert!(local.storage.metadata_cleanup_enabled);
+        assert_eq!(local.storage.metadata_retention_days, 90);
     }
 
     #[test]
@@ -2728,6 +2827,19 @@ mod tests {
     }
 
     #[test]
+    fn 日报编辑字体兼容旧配置且保存后保留选择() {
+        let mut json = serde_json::to_value(AppConfig::default()).unwrap();
+        assert_eq!(json["report_editor_font"], "");
+        json.as_object_mut().unwrap().remove("report_editor_font");
+        let mut config: AppConfig = serde_json::from_value(json).unwrap();
+        assert!(config.report_editor_font.is_empty());
+        config.report_editor_font = "Microsoft YaHei".into();
+        let saved = serde_json::to_string(&config).unwrap();
+        let loaded: AppConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded.report_editor_font, "Microsoft YaHei");
+    }
+
+    #[test]
     fn 桌宠默认位置应为空以便首次按锚点吸附() {
         let config = AppConfig::default();
 
@@ -2803,7 +2915,7 @@ mod tests {
             AiProvider::MiniMax.default_endpoint(),
             "https://api.minimaxi.com/v1"
         );
-        assert_eq!(AiProvider::MiniMax.default_model(), "MiniMax-M2.5");
+        assert_eq!(AiProvider::MiniMax.default_model(), "MiniMax-M3");
     }
 
     #[test]

@@ -705,6 +705,21 @@ fn pick_excerpt(candidates: &[String]) -> String {
         .unwrap_or_default()
 }
 
+fn execute_add_column_if_missing(conn: &Connection, sql: &str) -> Result<()> {
+    match conn.execute(sql, []) {
+        Ok(_) => Ok(()),
+        Err(error)
+            if error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(AppError::Database(error)),
+    }
+}
+
 /// 数据库管理器
 ///
 /// 内部用 `Arc<Mutex<Connection>>` 实现廉价 Clone，
@@ -823,14 +838,14 @@ impl Database {
             [],
         )?;
 
-        let _ = conn.execute(
+        execute_add_column_if_missing(
+            &conn,
             "ALTER TABLE daily_reports ADD COLUMN fallback_reason TEXT",
-            [],
-        );
-        let _ = conn.execute(
+        )?;
+        execute_add_column_if_missing(
+            &conn,
             "ALTER TABLE daily_reports_localized ADD COLUMN fallback_reason TEXT",
-            [],
-        );
+        )?;
 
         conn.execute(
             "INSERT OR IGNORE INTO daily_reports_localized (date, locale, content, ai_mode, model_name, fallback_reason, created_at)
@@ -861,24 +876,33 @@ impl Database {
             [],
         )?;
 
-        // 迁移：添加 browser_url 列（如果不存在）
-        let _ = conn.execute("ALTER TABLE activities ADD COLUMN browser_url TEXT", []);
-        // 迁移：添加 executable_path 列（如果不存在）
-        let _ = conn.execute("ALTER TABLE activities ADD COLUMN executable_path TEXT", []);
-        // 迁移：添加 semantic_category 列（如果不存在）
-        let _ = conn.execute(
+        // 迁移：添加活动扩展列（已经存在时仅忽略明确的 duplicate column 错误）
+        execute_add_column_if_missing(&conn, "ALTER TABLE activities ADD COLUMN browser_url TEXT")?;
+        execute_add_column_if_missing(
+            &conn,
+            "ALTER TABLE activities ADD COLUMN executable_path TEXT",
+        )?;
+        execute_add_column_if_missing(
+            &conn,
             "ALTER TABLE activities ADD COLUMN semantic_category TEXT",
-            [],
-        );
-        // 迁移：添加 semantic_confidence 列（如果不存在）
-        let _ = conn.execute(
+        )?;
+        execute_add_column_if_missing(
+            &conn,
             "ALTER TABLE activities ADD COLUMN semantic_confidence INTEGER",
-            [],
-        );
-        // 迁移：添加 screenshot_url 列（远程存储 URL）
-        let _ = conn.execute("ALTER TABLE activities ADD COLUMN screenshot_url TEXT", []);
+        )?;
+        execute_add_column_if_missing(
+            &conn,
+            "ALTER TABLE activities ADD COLUMN screenshot_url TEXT",
+        )?;
 
-        // AI 实体分类缓存：后台任务对未知应用/域名做一次性归类,此后采集直接查表,
+        // URL 合并查询按 RTRIM 规范化；表达式索引避免每次浏览器采样扫描当天历史。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_activities_browser_url_normalized
+             ON activities (RTRIM(browser_url, '/'), timestamp, id)",
+            [],
+        )?;
+
+        // AI 实体分类缓存:后台任务对未知应用/域名做一次性归类,此后采集直接查表,
         // 无需用户手动加规则。entity_key 形如 "app:xxx" / "domain:yyy"。
         conn.execute(
             "CREATE TABLE IF NOT EXISTS entity_category_cache (
@@ -972,11 +996,11 @@ impl Database {
             )",
             [],
         )?;
-        // 兼容旧数据库：首次升级时补充重建代际列；重复执行时忽略 duplicate column。
-        let _ = conn.execute(
+        // 兼容旧数据库：首次升级时补充重建代际列；重复执行时仅忽略 duplicate column。
+        execute_add_column_if_missing(
+            &conn,
             "ALTER TABLE semantic_memory_state ADD COLUMN build_id TEXT NOT NULL DEFAULT ''",
-            [],
-        );
+        )?;
         conn.execute(
             "INSERT OR IGNORE INTO semantic_memory_state (singleton_id, updated_at) VALUES (1, ?1)",
             params![chrono::Utc::now().timestamp()],
@@ -1263,7 +1287,7 @@ impl Database {
         let normalized_url = normalize_url(browser_url);
         log::debug!("URL 合并查询: 原始='{browser_url}', 规范化='{normalized_url}'");
 
-        // 使用 RTRIM 规范化数据库中的 URL 进行比较
+        // 与表达式索引保持一致，兼容历史记录中带末尾斜杠的 URL。
         let sql = format!(
             "SELECT {ACTIVITY_SELECT_COLUMNS}
              FROM activities
@@ -1333,7 +1357,10 @@ impl Database {
         };
 
         // 如果有新的 browser_url，一并更新（解决 SPA 页面导航后 URL 不刷新的问题）
-        if let Some(url) = new_browser_url.filter(|u| !u.is_empty()) {
+        if let Some(url) = new_browser_url
+            .map(normalize_url)
+            .filter(|url| !url.is_empty())
+        {
             conn.execute(
                 "UPDATE activities
                  SET duration = duration + ?1,
@@ -1428,6 +1455,21 @@ impl Database {
         )?;
 
         Ok(())
+    }
+
+    /// 清空指定日期目录下已删除的本地截图路径，保留可能仍有效的远程 URL。
+    pub fn clear_screenshot_paths_for_date(&self, date: &str) -> Result<usize> {
+        let conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+        let forward_prefix = format!("screenshots/{date}/%");
+        let windows_prefix = format!(r"screenshots\{date}\%");
+        Ok(conn.execute(
+            "UPDATE activities
+             SET screenshot_path = ''
+             WHERE screenshot_path LIKE ?1 OR screenshot_path LIKE ?2",
+            params![forward_prefix, windows_prefix],
+        )?)
     }
 
     /// 查找「本地有截图但远程 URL 缺失」的近期活动（远程存储补传用），
@@ -1652,8 +1694,10 @@ impl Database {
             "DELETE FROM activities WHERE timestamp < ?1",
             params![upper_ts],
         )?;
-        Self::invalidate_daily_cache(&tx, &dates)?;
-        Self::clear_memory_chunks_and_mark_rebuild_required_on(&tx)?;
+        if deleted > 0 {
+            Self::invalidate_daily_cache(&tx, &dates)?;
+            Self::clear_memory_chunks_and_mark_rebuild_required_on(&tx)?;
+        }
         tx.commit()?;
         Ok(deleted)
     }
@@ -2836,6 +2880,8 @@ impl Database {
 
     /// 列出所有可用日报日期
     pub fn list_report_dates(&self, limit: usize) -> Result<Vec<String>> {
+        let limit = i64::try_from(limit)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let conn = self.conn.lock().map_err(|e| {
             AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
         })?;
@@ -5044,8 +5090,8 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_flex_overtime_correction, local_day_bounds, local_hour_bounds,
-        local_hour_end_timestamp, safe_local_timestamp, Activity, Database,
+        apply_flex_overtime_correction, execute_add_column_if_missing, local_day_bounds,
+        local_hour_bounds, local_hour_end_timestamp, safe_local_timestamp, Activity, Database,
         SemanticMemoryIndexState,
     };
     use chrono::{TimeZone, Timelike};
@@ -5075,6 +5121,148 @@ mod tests {
         };
         db.init_tables().expect("初始化内存数据库失败");
         db
+    }
+
+    #[test]
+    fn 内置sqlite必须包含wal页大小校验安全补丁() {
+        assert!(
+            rusqlite::version_number() >= 3_054_001,
+            "SQLite {}",
+            rusqlite::version()
+        );
+    }
+
+    #[test]
+    fn 日报日期限制应保留排序去重和溢出拒绝() {
+        let db = in_memory_db();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO daily_reports_localized(date,locale,content,ai_mode,created_at) VALUES
+             ('2026-11-01','zh-CN','report','local',1),
+             ('2026-11-02','zh-CN','report','local',2),
+             ('2026-11-02','en','report','local',2);",
+            )
+            .unwrap();
+        assert!(db.list_report_dates(0).unwrap().is_empty());
+        assert_eq!(db.list_report_dates(1).unwrap(), ["2026-11-02"]);
+        assert_eq!(
+            db.list_report_dates(10).unwrap(),
+            ["2026-11-02", "2026-11-01"]
+        );
+        if usize::BITS == 64 {
+            assert!(db.list_report_dates(usize::MAX).is_err());
+        }
+    }
+
+    #[test]
+    fn sqlite升级应兼容旧数据库与已提交wal并保留迁移备份() {
+        for with_wal in [false, true] {
+            let dir = temp_db_path("sqlite-upgrade").with_extension("");
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("legacy.db");
+            std::fs::write(
+                &path,
+                include_bytes!("../tests/fixtures/sqlite-3.44.0.sqlite"),
+            )
+            .unwrap();
+            if with_wal {
+                std::fs::write(
+                    dir.join("legacy.db-wal"),
+                    include_bytes!("../tests/fixtures/sqlite-3.44.0.sqlite-wal"),
+                )
+                .unwrap();
+            }
+            let expected_count = if with_wal { 2 } else { 1 };
+            let expected_duration = if with_wal { 75 } else { 30 };
+            let db = Database::new(&path).unwrap();
+            let activities = db.get_activities_in_range(None, None, 10).unwrap();
+            assert_eq!(activities.len(), expected_count);
+            assert_eq!(
+                activities.iter().map(|row| row.duration).sum::<i64>(),
+                expected_duration
+            );
+            let old = db.get_activity_by_id(1).unwrap().unwrap();
+            assert_eq!(old.app_name, "Legacy Editor");
+            assert_eq!(old.screenshot_path, "screenshots/legacy.png");
+            assert!(old.browser_url.is_none() && old.screenshot_url.is_none());
+            assert_eq!(
+                db.get_report("2026-11-01", None).unwrap().unwrap().content,
+                "旧版合成日报"
+            );
+            if with_wal {
+                assert_eq!(
+                    db.get_report("2026-11-02", None).unwrap().unwrap().content,
+                    "WAL 合成日报"
+                );
+            }
+            let date = chrono::DateTime::from_timestamp(old.timestamp, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string();
+            assert_eq!(
+                db.get_daily_stats(&date).unwrap().total_duration,
+                expected_duration
+            );
+            db.insert_activity(&Activity {
+                id: None,
+                timestamp: old.timestamp + 300,
+                duration: 5,
+                window_title: "Written after SQLite upgrade".to_string(),
+                ..old
+            })
+            .unwrap();
+            let backup_path = dir.join("backup.db");
+            db.backup_to(&backup_path).unwrap();
+            drop(db);
+            for candidate in [&path, &backup_path] {
+                let reopened = Database::new(candidate).unwrap();
+                assert_eq!(
+                    reopened
+                        .get_activities_in_range(None, None, 10)
+                        .unwrap()
+                        .len(),
+                    expected_count + 1
+                );
+                assert_eq!(
+                    reopened.get_daily_stats(&date).unwrap().total_duration,
+                    expected_duration + 5
+                );
+                assert_eq!(
+                    reopened.list_report_dates(10).unwrap().len(),
+                    expected_count
+                );
+                assert_eq!(
+                    reopened
+                        .conn
+                        .lock()
+                        .unwrap()
+                        .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                        .unwrap(),
+                    "ok"
+                );
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn 数据库迁移只忽略重复列而传播其他错误() {
+        let conn = rusqlite::Connection::open_in_memory().expect("创建内存数据库失败");
+        conn.execute("CREATE TABLE items (id INTEGER)", [])
+            .expect("创建测试表失败");
+
+        execute_add_column_if_missing(&conn, "ALTER TABLE items ADD COLUMN label TEXT")
+            .expect("首次添加列应成功");
+        execute_add_column_if_missing(&conn, "ALTER TABLE items ADD COLUMN label TEXT")
+            .expect("重复添加同一列应被安全忽略");
+        assert!(execute_add_column_if_missing(
+            &conn,
+            "ALTER TABLE missing_items ADD COLUMN label TEXT"
+        )
+        .is_err());
     }
 
     #[test]
@@ -7588,6 +7776,22 @@ mod tests {
             .expect("Unicode 字母数字及安全分隔符应可用");
         assert_eq!(valid.memory_key, "回答风格.v2");
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn 无过期活动时定期清理不得清空语义索引() {
+        let (path, db, _, _, date) = seed_activity_deletion_state("retention-noop");
+        assert_eq!(db.delete_activities_before_date(&date).unwrap(), 0);
+        let count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM memory_chunks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "未删除活动时应保留已建好的语义块");
+        assert!(db.get_report(&date, Some("zh-CN")).unwrap().is_some());
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
